@@ -1,0 +1,64 @@
+name: release
+
+# Publishes a wheel to PyPI when a version tag is pushed.
+#
+# No secrets: PyPI trusted publishing verifies this workflow's identity, and
+# the client carries no keys of its own — usage analytics ride the user's own
+# authenticated connection to their deployment.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and check the wheel without publishing"
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify the tag matches the packaged version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          packaged=$(python -c "import scriptit_cli; print(scriptit_cli.__version__)")
+          if [ "$tag" != "$packaged" ]; then
+            echo "tag $tag != scriptit_cli.__version__ $packaged" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # Trusted publishing: PyPI verifies this workflow's identity, so no API
+      # token is stored anywhere.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

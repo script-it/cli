@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scriptit-cli"
+# Single-sourced from scriptit_cli/__init__.py — two copies drift.
+dynamic = ["version"]
+description = "Run and manage your Script.it automations from the terminal, or from a coding agent"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "Script.it" }]
+keywords = ["scriptit", "cli", "automation", "agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "requests>=2.28",
+  "fire>=0.5",
+  # Cross-platform advisory locking for the credential/state stores. Hand-rolled
+  # `fcntl.flock` held only on POSIX, so Windows silently lost concurrent writes.
+  "filelock>=3.12",
+  # PEP 440 comparison for the update notice and the sandbox skew check.
+  "packaging>=23.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://script.it"
+Source = "https://github.com/bespo-ai/script.it-cli"
+Issues = "https://github.com/bespo-ai/script.it-cli/issues"
+Changelog = "https://github.com/bespo-ai/script.it-cli/releases"
+
+[project.scripts]
+scriptit = "scriptit_cli.main:main"
+
+[tool.hatch.version]
+path = "scriptit_cli/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scriptit_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+# Correctness and hygiene, not style opinions: pyflakes (undefined names,
+# unused imports), bugbear, import order, and ruff's own checks — which
+# include flagging a `noqa` for a rule nobody runs.
+select = ["E4", "E7", "E9", "F", "I", "B", "RUF", "S", "SIM"]
+ignore = [
+  # `Dict`/`Optional` spellings stay: this targets 3.9, and rewriting the
+  # annotations is churn that would touch nearly every line.
+  "UP",
+  # Deliberate: browser launch, cache writes and session tagging are all
+  # best-effort, and each has a comment saying why swallowing is correct.
+  "S110",
+  "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into internals on purpose, and assert on temp paths.
+"tests/*" = ["S101", "S105", "S106", "SLF001"]
