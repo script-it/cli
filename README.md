@@ -1,4 +1,4 @@
-# scriptit-cli
+# <img src="assets/logo.png" alt="" height="30" align="top"> Script.it
 
 <!-- PyPI badges are held back until the package is published; shields.io
      renders "package or version not found" for an unpublished name.
@@ -8,6 +8,8 @@
 [![CI](https://github.com/bespo-ai/script.it-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/bespo-ai/script.it-cli/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+<img src="assets/squiggle.png" alt="" width="100%">
 
 Your [Script.it](https://script.it) workspace, from the terminal — and from any
 coding agent.
