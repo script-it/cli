@@ -192,12 +192,28 @@ def build(client: "RemoteClient", sandbox_id: str, session_id: str) -> Dict[str,
     return bundle
 
 
+# Printed first, because a harness that truncates decides what to keep by
+# position. The bundle runs to tens of thousands of characters — most agent
+# hosts cap inline command output well below that and spill the rest to a
+# file, so an agent can silently act on the first screen and never see the
+# skills index or what is connected.
+_PREAMBLE = """\
+=== Script.it session context: read all of it before running anything ===
+This is instructions, not output. Below: how sessions work, the app links to
+open for the user, the account's connected integrations, and the full skills
+index. It is long. If your harness truncated this or wrote it to a file, open
+that file and read to the end — acting on the first part alone means working
+without knowing what is connected or what skills exist.
+"""
+
+
 def render(bundle: Dict[str, Any]) -> None:
     """Print the bundle for a human/agent reading stdout.
 
     `--json` callers get the dict itself; this is the other half of that same
     payload, so the two never say different things.
     """
+    print(_PREAMBLE)
     print(bundle["notes"])
     if bundle["links"]:
         print(bundle["links"])

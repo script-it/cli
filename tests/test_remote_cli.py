@@ -1286,3 +1286,42 @@ def test_the_store_lock_serializes_concurrent_writers(tmp_path) -> None:
     with open(path) as f:
         final = json.load(f)
     assert final == {f"w{i}": 10 for i in range(4)}, f"lost updates: {final}"
+
+
+def test_the_bundle_tells_a_truncating_harness_to_read_it_all() -> None:
+    """The bundle runs to tens of thousands of characters and most agent hosts
+    cap inline output below that, spilling the rest to a file. The warning has
+    to come first, because position is what a truncating host preserves."""
+    import io
+    from contextlib import redirect_stdout
+
+    from scriptit_cli import agentcontext as ac
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        ac.render(ac.build(_FakeClient("https://app.example.test"), "sbx_1", "ses_42"))
+    out = buf.getvalue()
+    assert out.startswith("=== Script.it session context: read all of it")
+    assert "read to the end" in out[:600]
+
+
+def test_a_known_harness_needs_no_manual_declaration() -> None:
+    """SCRIPTIT_CLIENT is the fallback, not the contract: hosts already export
+    a marker, and asking an agent to set one it cannot know is a step that
+    silently no-ops when skipped."""
+    import os
+
+    from scriptit_cli.remote import _CLIENT_ENV_MARKERS, detect_client
+
+    for var, slug in _CLIENT_ENV_MARKERS:
+        env = {k: v for k, v in os.environ.items() if k not in dict(_CLIENT_ENV_MARKERS)}
+        env.pop("SCRIPTIT_CLIENT", None)
+        env[var] = "1"
+        old = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(env)
+        try:
+            assert detect_client() == slug, var
+        finally:
+            os.environ.clear()
+            os.environ.update(old)

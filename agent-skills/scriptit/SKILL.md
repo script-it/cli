@@ -15,21 +15,27 @@ Script.it app.
 1. `scriptit auth status` — confirm the machine is connected (if not, ask the
    user to run `scriptit auth login`; don't run it yourself, it opens their
    browser).
-2. Export `SCRIPTIT_CLIENT=<your-harness-slug>` (e.g. `claude-code`,
-   `codex`, `cursor`) so the platform session is attributed to the harness
-   driving it — it lands in the session's tags and title.
-3. `scriptit session new` — creates the session your work will run in and
+2. `scriptit session new` — creates the session your work will run in and
    prints the **context bundle**: how sessions work, the URL where the user
    can watch this session, the account's **connected integrations** (each
    one's name, API base URL and granted scopes — this is what tells you what
    `llm-gateway`, `web-search-gateway` etc. actually are), and the live index
-   of all skills (platform + the user's workspace scripts). Read it.
+   of all skills (platform + the user's workspace scripts).
+   **Read every line of it.** It runs to tens of thousands of characters, and
+   most hosts cap inline command output below that and write the rest to a
+   file. If yours truncated it or gave you a path, open the file and read to
+   the end — the integrations and skills are at the bottom.
    Continuing earlier work? `scriptit session current` shows the session
    you are already on — reuse it instead of starting another.
-4. `scriptit describe --concepts` — the platform reference: the script /
+3. `scriptit describe --concepts` — the platform reference: the script /
    block / trigger model, `${{ }}` expressions, path syntax, the Python
    `@block()` API, and how to call integrations. Read it before authoring or
    editing any script; it is the same model the in-product agent works from.
+
+The session is attributed to whichever harness is driving it: the CLI reads
+the marker your host already sets (`CLAUDECODE`, `CODEX_SANDBOX`,
+`CURSOR_TRACE_ID`, `GEMINI_CLI`, ...). Only if you are something else does it
+need telling — `export SCRIPTIT_CLIENT=<your-slug>` before step 2.
 
 ## Sessions
 
