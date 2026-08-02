@@ -1325,3 +1325,33 @@ def test_a_known_harness_needs_no_manual_declaration() -> None:
         finally:
             os.environ.clear()
             os.environ.update(old)
+
+
+def test_the_entry_point_skill_stays_a_bootstrap() -> None:
+    """The skill is a copy on the user's disk, updated only when they
+    re-download it; the bundle ships with the client and is printed live. So
+    anything said in both drifts, and the frozen copy is the one that goes
+    stale. The skill keeps how to start; the bundle keeps what is true.
+    """
+    from pathlib import Path
+
+    from scriptit_cli import agentcontext as ac
+
+    root = Path(__file__).resolve().parent.parent
+    skill = (root / "agent-skills/scriptit/SKILL.md").read_text().lower()
+    # The rendered bundle, not the templates: `?settings=integrations` only
+    # exists once the session URL is filled in.
+    built = ac.build(_FakeClient("https://app.example.test"), "sbx_1", "ses_42")
+    bundle = (built["notes"] + built["links"]).lower()
+    for topic in (
+        "data_files",
+        "sticky",
+        "one at a time",
+        "--timeout",
+        "fs ls",
+        "files_written",
+        "8kb",
+        "?settings=integrations",
+    ):
+        assert topic in bundle, f"the bundle should own {topic!r}"
+        assert topic not in skill, f"{topic!r} is duplicated in the skill"

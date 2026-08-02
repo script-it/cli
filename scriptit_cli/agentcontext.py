@@ -61,6 +61,9 @@ How to work remotely
   for the full skill. Workspace scripts are themselves skills.
 - Add `--json` to auth/fs/session/sandbox for machine-readable output
   (`fs read` and `exec` stream raw output instead, by design).
+- Long output is safe: the live stream caps text at ~8KB, but every
+  command is also written to a file and read back, so you get all of it
+  and the real exit code.
 
 Running a script and finding what it produced
 - `scriptit start <name>` takes a bare script name and resolves it across the
