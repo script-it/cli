@@ -19,6 +19,7 @@ import contextlib
 import json
 import queue
 import secrets
+import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -27,6 +28,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from scriptit_cli.analytics import analytics
+from scriptit_cli.client import detect_client
 from scriptit_cli.output import emit, fail, note, warn
 from scriptit_cli.remote_auth import (
     RemoteAuthError,
@@ -35,6 +37,7 @@ from scriptit_cli.remote_auth import (
     delete_credentials,
     exchange_custom_token,
     get_fresh_id_token,
+    keycloak_device_login,
     list_profiles,
     load_credentials,
     save_credentials,
@@ -135,8 +138,26 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _should_open_browser(no_browser: bool) -> bool:
+    """Whether to pop a browser window for the login URL.
+
+    An agent harness has its own browser and cannot see the one
+    ``webbrowser.open`` launches, so opening it puts a login page in front of
+    the human instead of the agent — while the agent, which is the caller,
+    learns nothing. :func:`detect_client` already knows when a harness is
+    driving (it reads the same markers used for session attribution), so the
+    URL is simply printed there and whoever is driving decides what to do
+    with it.
+    """
+    return not no_browser and detect_client() is None
+
+
 def _receive_via_loopback(
-    login_url_base: str, state: str, timeout: int, allowed_origin: str
+    login_url_base: str,
+    state: str,
+    timeout: int,
+    allowed_origin: str,
+    open_browser: bool = True,
 ) -> Dict[str, Any]:
     payload_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
 
@@ -157,13 +178,17 @@ def _receive_via_loopback(
     url = f"{login_url_base}?port={port}&state={state}"
     # flush: agents and scripts read this through pipes, where Python
     # block-buffers stdout — the URL must be visible before we block.
-    note("Opening your browser to complete login…")
-    note(f"  {url}")
-    note("(If the browser doesn't open, paste the URL yourself.)")
-    # A headless or misconfigured machine simply doesn't open one; the URL
-    # is already printed above, which is the fallback.
-    with contextlib.suppress(Exception):
-        webbrowser.open(url)
+    if open_browser:
+        note("Opening your browser to complete login…")
+        note(f"  {url}")
+        note("(If the browser doesn't open, paste the URL yourself.)")
+        # A headless or misconfigured machine simply doesn't open one; the URL
+        # is already printed above, which is the fallback.
+        with contextlib.suppress(Exception):
+            webbrowser.open(url)
+    else:
+        note("Open this URL in a browser where you're signed in to Script.it:")
+        note(f"  {url}")
 
     try:
         return payload_queue.get(timeout=timeout)
@@ -252,6 +277,7 @@ class AuthCommands:
         manual: bool = False,
         timeout: int = LOGIN_TIMEOUT_SECONDS,
         profile: Optional[str] = None,
+        no_browser: bool = False,
     ) -> None:
         """Connect this machine to your Script.it account.
 
@@ -266,6 +292,8 @@ class AuthCommands:
             profile: Named profile to store this login under (multiple
                 accounts side by side; switch with `scriptit auth use`,
                 override per-invocation with SCRIPTIT_PROFILE).
+            no_browser: Print the login URL instead of opening a window.
+                Implied when an agent harness is driving.
         """
         existing = load_credentials(profile) or {}
         api_url = str(api_url or existing.get("api_url") or DEFAULT_API_URL).rstrip("/")
@@ -292,7 +320,11 @@ class AuthCommands:
                 payload = _receive_via_manual(login_url_base, state)
             else:
                 payload = _receive_via_loopback(
-                    login_url_base, state, timeout, allowed_origin=app_url
+                    login_url_base,
+                    state,
+                    timeout,
+                    allowed_origin=app_url,
+                    open_browser=_should_open_browser(no_browser),
                 )
             tokens = exchange_custom_token(
                 str(payload["firebase_api_key"]),
@@ -323,8 +355,6 @@ class AuthCommands:
         profile: Optional[str] = None,
     ) -> None:
         """RFC 8628 device grant against the realm advertised by /auth/config."""
-        from scriptit_cli.remote_auth import keycloak_device_login
-
         keycloak = config.get("keycloak") or {}
         if not (keycloak.get("url") and keycloak.get("realm") and keycloak.get("client_id")):
             fail("the API did not advertise Keycloak realm details")
@@ -340,6 +370,89 @@ class AuthCommands:
         creds["api_url"] = api_url
         save_credentials(creds, profile=profile)
         _verify_stored_login(api_url, creds, profile)
+
+    def browser_url(
+        self,
+        next: str = "/app",
+        profile: Optional[str] = None,
+    ) -> None:
+        """Print a one-time URL that signs a browser in as this machine's user.
+
+        The inverse of `login`. There a signed-in browser lends a session to
+        the CLI; here a signed-in CLI lends one to a browser — for an agent
+        that can already drive the platform through this CLI but has no way to
+        *see* it.
+
+        An agent cannot log in on the user's behalf: the login page mints its
+        token because it is already signed in, and an agent's browser is not,
+        so the only way through would be typing the user's password. Borrowing
+        this machine's existing session is what an agent can do instead.
+
+        The URL is a credential. It is good for 60 seconds, once, and the code
+        rides in the fragment so it reaches no server log. Treat it as you
+        would a password for that minute: the backend records every redeem and
+        emails the account when one arrives from an unfamiliar address.
+
+        Script.it Cloud only. An on-prem deployment authenticates through
+        Keycloak, which has no equivalent, and the backend says so rather than
+        failing obscurely.
+
+        Args:
+            next: Same-origin path to land on, e.g. `/app/s/<session_id>`.
+                The page refuses anything that would leave the origin.
+            profile: Named profile to use (default: the active one).
+        """
+        creds = load_credentials(profile)
+        if not creds:
+            fail("not logged in — run `scriptit auth login`")
+
+        app_url = str(creds.get("app_url") or "").rstrip("/")
+        if not app_url:
+            fail(
+                "this login recorded no browser origin — run `scriptit auth login` "
+                "again to refresh it"
+            )
+
+        api_url = str(creds["api_url"]).rstrip("/")
+        try:
+            token = get_fresh_id_token(creds)
+        except RemoteAuthError as exc:
+            fail(str(exc))
+
+        try:
+            resp = requests.post(
+                f"{api_url}/api/v1/auth/browser-handoff",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"client": detect_client()},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            fail(f"could not reach {api_url}: {exc}")
+
+        if resp.status_code != 200:
+            # 409 is the deployment saying it cannot do this at all (Keycloak).
+            # Its wording is the useful part, so it is passed through rather
+            # than replaced with a guess about why.
+            detail = resp.text[:300]
+            with contextlib.suppress(ValueError, KeyError, TypeError):
+                detail = resp.json()["detail"]
+            fail(f"could not mint a browser link ({resp.status_code}): {detail}")
+
+        body = resp.json()
+        # The code goes in the fragment, never the query string: a fragment is
+        # not sent to any server and never lands in an access log or a Referer.
+        url = f"{app_url}/app/cli-handoff#code={body['code']}&next={next}"
+        expires_in = int(body.get("expires_in") or 60)
+
+        def _human() -> None:
+            print(url)
+            print(
+                f"\nOpen it within {expires_in}s — it works once. Anyone who reads it "
+                "in that window can sign in as you.",
+                file=sys.stderr,
+            )
+
+        emit({"url": url, "expires_in": expires_in}, _human)
 
     def list(self) -> None:
         """List stored login profiles (the active one is starred)."""

@@ -19,6 +19,8 @@ import threading
 import time
 from typing import Optional, Tuple
 
+import requests
+
 from scriptit_cli import __version__
 from scriptit_cli.config import _config_dir
 from scriptit_cli.util import parse_version, update_json_file
@@ -76,8 +78,6 @@ def is_newer(latest: Optional[str], current: str = __version__) -> bool:
 
 def _fetch_latest() -> None:
     try:
-        import requests
-
         resp = requests.get(PYPI_URL, timeout=_FETCH_TIMEOUT_SECONDS)
         if resp.status_code != 200:
             # Record the attempt so an unpublished or unreachable index is not

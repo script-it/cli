@@ -28,6 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import requests
 
 from scriptit_cli.analytics import analytics
+from scriptit_cli.client import detect_client
 from scriptit_cli.config import _config_dir
 from scriptit_cli.errors import RemoteAuthError, RemoteError, ScriptItError
 from scriptit_cli.remote_auth import get_fresh_id_token, load_credentials
@@ -79,35 +80,6 @@ def make_message_id() -> str:
     alphabet = string.digits + string.ascii_uppercase + string.ascii_lowercase
     rand = "".join(secrets.choice(alphabet) for _ in range(14))
     return f"msg_{hex_part}{rand}"
-
-
-# Harness markers, checked in order. Self-declaration via SCRIPTIT_CLIENT
-# (documented in the entry-point skill) always wins; these cover harnesses
-# that export an identifying variable without being asked.
-_CLIENT_ENV_MARKERS: List[Tuple[str, str]] = [
-    ("CLAUDECODE", "claude-code"),
-    ("CLAUDE_CODE_ENTRYPOINT", "claude-code"),
-    ("CODEX_SANDBOX", "codex"),
-    ("CURSOR_TRACE_ID", "cursor"),
-    ("GEMINI_CLI", "gemini-cli"),
-]
-
-
-def detect_client() -> Optional[str]:
-    """The driving harness's slug (``claude-code``, ``codex``, ...), or None.
-
-    ``SCRIPTIT_CLIENT`` is the explicit contract — agents are told to set it
-    before ``scriptit session new``. Known harness env markers are a
-    best-effort fallback; both are self-reported, so this is attribution
-    for the session UI and analytics, not a security boundary.
-    """
-    explicit = os.environ.get("SCRIPTIT_CLIENT", "").strip().lower()
-    if explicit:
-        return "".join(ch for ch in explicit if ch.isalnum() or ch in "-_")[:32] or None
-    for var, slug in _CLIENT_ENV_MARKERS:
-        if os.environ.get(var):
-            return slug
-    return None
 
 
 def apply_cwd(command: str, cwd: Optional[str]) -> str:
