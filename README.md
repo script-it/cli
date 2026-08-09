@@ -21,6 +21,16 @@ environment with your integrations already connected.
 
 This CLI drives that environment from your machine.
 
+## Using this with a coding agent?
+
+Give the agent the bundled [Script.it skill](agent-skills/scriptit/SKILL.md)
+first. It tells the agent how to authenticate, create a session, fetch its live
+instructions, and use every client-side command without copying product rules
+that can go stale.
+
+Install the CLI and skill using the steps below, then tell the agent: **Use
+Script.it.**
+
 ## Install
 
 **Before you start.** Python 3.9 or newer, and a Script.it account — create one
@@ -84,7 +94,7 @@ scriptit skills list
 scriptit start <name-from-that-list>
 ```
 
-### Set up your coding agent
+**5. Set up your coding agent.**
 
 Install the entry-point skill once, and any agent that reads skills knows how
 to drive your workspace:
@@ -166,6 +176,7 @@ scriptit logs <run-id>                # ...and read what it did
 scriptit trigger list                 # what fires it, and when
 scriptit integrations list            # what it can reach
 scriptit describe --concepts          # the full platform reference
+scriptit describe --system            # agent-ready runtime context
 ```
 
 Run any shell command in your environment:
@@ -182,7 +193,7 @@ rather than outliving a client that stopped waiting.
 Move files both ways:
 
 ```bash
-scriptit fs ls /workspaces/<workspace-id>
+scriptit exec -- ls /workspaces/<workspace-id>
 scriptit fs push ./report.csv /workspaces/<workspace-id>/assets/report.csv
 scriptit fs pull /workspaces/<workspace-id>/logs/run.log .
 ```
@@ -196,6 +207,7 @@ sticky: it persists across commands and across shells until you start another.
 ```bash
 scriptit session current              # which session am I on, and why
 scriptit session new                  # start a fresh one
+scriptit context                      # fetch this session's agent instructions
 scriptit session use ses_abc123       # reattach to an earlier one
 scriptit session list                 # recent sessions
 ```
@@ -217,14 +229,15 @@ That is also how an agent harness gives each task its own transcript.
 
 ### Machine-readable output
 
-Add `--json` to any of `auth`, `fs`, `session`, `sandbox` or `version`.
+Add `--json` to any of `auth`, `context`, `fs`, `session`, `sandbox` or
+`version`.
 **stdout becomes exactly one JSON document, and everything else — progress,
 prompts, warnings, errors — goes to stderr**, so you can pipe stdout straight
 into a parser:
 
 ```bash
 scriptit sandbox status --json | jq -r '.sandboxes[].state'
-scriptit session new --json | jq -r '.context.skills'
+scriptit context --json | jq -r '.skills'
 ```
 
 On failure the document is `{"error": "..."}` and the exit code is non-zero —
@@ -240,17 +253,18 @@ Script.it, which decides what it means.
 
 ### Which commands are which
 
-This client answers `auth`, `exec`, `fs`, `session`, `sandbox` and `version`
-itself. **Everything else is forwarded** — `start`, `status`, `logs`, `wait`,
-`validate`, `describe`, `trigger *`, `integrations *`, `skills *`, … — and
-answered by Script.it.
+This client answers `auth`, `context`, `exec`, `fs`, `session`, `sandbox` and
+`version` itself. **Everything else is forwarded** — `start`, `status`, `logs`,
+`wait`, `validate`, `describe`, `trigger *`, `integrations *`, `skills *`, … —
+and answered by Script.it.
 
 That is deliberate: the platform stays the single source of behavior, so a
 feature added there works through the client you already have. No upgrade
 needed, and no command list here to fall out of date.
 
 `scriptit --help` covers the local commands; `scriptit describe --concepts`
-covers the platform.
+covers the structured platform reference, and `scriptit describe --system`
+renders that runtime knowledge for agent context.
 
 ## Use it from a coding agent
 
@@ -258,12 +272,12 @@ One file — [`agent-skills/scriptit/`](agent-skills/scriptit/SKILL.md) — inst
 into the agent host once; [Set up your coding agent](#set-up-your-coding-agent)
 above has the command.
 
-The skill carries almost no platform knowledge on purpose. It bootstraps with
-`scriptit session new`, which returns a live context bundle — how sessions
-work, the app links for watching the session and connecting integrations, your
-connected integrations, and the current index of skills and scripts — so the
-agent's picture of your account is correct without the skill ever being
-updated.
+The skill carries almost no platform knowledge on purpose. It creates a fresh
+session, then runs `scriptit context` to fetch one complete live bundle of
+runtime guidance, product behavior, external-agent workflow, authoritative app
+links, connected integrations, and current skills. The workstation client only
+transports and prints that bundle, so agent behavior is updated with the
+platform instead of being copied into each CLI release.
 
 ## Good to know
 

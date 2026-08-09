@@ -43,6 +43,7 @@ ENV_SESSION = "SCRIPTIT_SESSION"
 # sandbox and answered by the CLI running there.
 CLIENT_COMMANDS = {
     "auth",
+    "context",
     "fs",
     "session",
     "sandbox",
@@ -432,6 +433,27 @@ class RemoteClient:
 
     def _proxy(self, sandbox_id: str, path: str) -> str:
         return f"/api/v1/sandbox/{sandbox_id}/proxy/{path}"
+
+    def agent_context(self, sandbox_id: str, context_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the complete sandbox-assembled external-agent context."""
+        resp = self.request(
+            "POST",
+            self._proxy(sandbox_id, "agent-context"),
+            json=context_data,
+            wake_on_503=False,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RemoteError(f"agent context unavailable ({resp.status_code}): {resp.text[:300]}")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise RemoteError("agent context returned invalid JSON") from exc
+        if not isinstance(body, dict) or body.get("schema_version") != 1:
+            raise RemoteError("agent context returned an unsupported schema")
+        if not isinstance(body.get("markdown"), str) or not body["markdown"].strip():
+            raise RemoteError("agent context omitted its rendered instructions")
+        return body
 
     def session_exists(self, sandbox_id: str, session_id: str) -> bool:
         resp = self.request(
@@ -837,15 +859,6 @@ class RemoteClient:
         return output, exit_code
 
     # -- files -------------------------------------------------------------
-
-    def fs_list(self, sandbox_id: str, path: str) -> Dict[str, Any]:
-        """List a sandbox directory via the backend file routes."""
-        resp = self.request(
-            "GET", f"/api/v1/file/{sandbox_id}/list", params={"path": path}, timeout=60
-        )
-        if resp.status_code != 200:
-            raise RemoteError(f"list failed ({resp.status_code}): {resp.text[:300]}")
-        return resp.json()
 
     def fs_read(self, sandbox_id: str, path: str) -> bytes:
         """Read a sandbox file's bytes (base64 over the wire, decoded here)."""

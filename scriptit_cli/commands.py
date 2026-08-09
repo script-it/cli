@@ -1,22 +1,69 @@
 """Workstation-side commands for remote sandbox access.
 
 ``fs`` wraps the platform's file API; ``session`` manages the sticky anchor
-session that remote shell commands run in; ``sandbox`` surfaces lifecycle
-state. All of these are client conveniences with no in-sandbox analogue —
-every other verb passes through and runs inside the sandbox.
+session that remote shell commands run in; ``context`` fetches the complete
+agent context; ``sandbox`` surfaces lifecycle state. These are client
+conveniences — every other verb passes through and runs inside the sandbox.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from scriptit_cli import agentcontext
+from scriptit_cli import MIN_SANDBOX_CLI_VERSION
 from scriptit_cli.analytics import analytics
 from scriptit_cli.errors import ScriptItError
 from scriptit_cli.output import emit, fail
 from scriptit_cli.remote import ENV_SESSION, RemoteClient, update_state
+
+_CONTEXT_MARKER = "===SCRIPTIT-CONTEXT-SPLIT==="
+_CONTEXT_PROBE = (
+    "scriptit version 2>&1;"
+    f" echo '{_CONTEXT_MARKER}';"
+    " scriptit integrations list 2>/dev/null;"
+    f" echo '{_CONTEXT_MARKER}'; scriptit skills list 2>&1"
+)
+
+
+def _session_urls(client: RemoteClient, session_id: Optional[str]) -> Dict[str, Optional[str]]:
+    session_url = f"{client.app_url}/app/s/{session_id}" if client.app_url and session_id else None
+    return {
+        "session_url": session_url,
+        "integrations_url": (
+            f"{session_url}/integrations/connect/<integration-id>?view=companion"
+            if session_url
+            else None
+        ),
+    }
+
+
+def _fetch_context_bundle(
+    client: RemoteClient,
+    sandbox_id: str,
+    session_id: str,
+) -> Dict[str, Any]:
+    output, _ = client.shell(
+        _CONTEXT_PROBE,
+        sandbox_id=sandbox_id,
+        session_id=session_id,
+        timeout_s=120.0,
+        echo=False,
+    )
+    if output.count(_CONTEXT_MARKER) != 2:
+        raise ScriptItError("sandbox context probe returned an incomplete response")
+    version_output, _, remainder = output.partition(_CONTEXT_MARKER)
+    integrations, _, skills = remainder.partition(_CONTEXT_MARKER)
+    context_data: Dict[str, Any] = {
+        "session_id": session_id,
+        **_session_urls(client, session_id),
+        "sandbox_version": version_output.strip() or None,
+        "minimum_sandbox_version": MIN_SANDBOX_CLI_VERSION,
+        "integrations": integrations.strip() or None,
+        "skills": skills.strip() or None,
+    }
+    return client.agent_context(sandbox_id, context_data)
 
 
 def _client_or_exit() -> RemoteClient:
@@ -35,26 +82,21 @@ def _run(fn, *args: Any, **kwargs: Any) -> Any:
         fail(str(exc))
 
 
+def show_context() -> None:
+    """Fetch and print the complete external-agent context for this session."""
+    client = _client_or_exit()
+    sandbox_id = _run(client.ensure_sandbox)
+    session_id, _, _ = client.anchor()
+    if not session_id:
+        fail("no current session; run `scriptit session new` first")
+    if not _run(client.session_exists, sandbox_id, session_id):
+        fail(f"session {session_id} not found in sandbox {sandbox_id}")
+    bundle = _run(_fetch_context_bundle, client, sandbox_id, session_id)
+    emit(bundle, lambda: print(bundle["markdown"]))
+
+
 class FsCommands:
     """Files in your sandbox workspaces (paths like /workspaces/<wid>/...)."""
-
-    def ls(self, path: str) -> None:
-        """List a sandbox directory."""
-        client = _client_or_exit()
-        sandbox_id = _run(client.ensure_sandbox)
-        body: Dict[str, Any] = _run(client.fs_list, sandbox_id, path)
-        entries = body.get("entries") or body.get("files") or []
-
-        def _human() -> None:
-            for entry in entries:
-                if isinstance(entry, dict):
-                    name = entry.get("name") or entry.get("path") or "?"
-                    is_dir = entry.get("is_directory") or entry.get("is_dir")
-                    print(f"{name}{'/' if is_dir else ''}")
-                else:
-                    print(entry)
-
-        emit({"path": path, "entries": entries}, _human)
 
     def read(self, path: str) -> None:
         """Print a sandbox file to stdout (bytes pass through unmodified)."""
@@ -123,12 +165,8 @@ _ANCHOR_SOURCES = {
 class SessionCommands:
     """The anchor session remote commands run in (visible in the app UI)."""
 
-    def new(self, context: bool = True) -> None:
-        """Create a fresh anchor session and make it current.
-
-        Prints the context bundle (usage notes + current skills index) unless
-        --nocontext.
-        """
+    def new(self) -> None:
+        """Create a fresh anchor session and make it current."""
         client = _client_or_exit()
         sandbox_id = _run(client.ensure_sandbox)
         session_id = _run(client.create_session, sandbox_id)
@@ -136,29 +174,24 @@ class SessionCommands:
         # The funnel's first real step: a harness that gets this far has a
         # working credential and a live sandbox to drive.
         analytics.track("cli_session_created")
-        bundle = agentcontext.build(client, sandbox_id, session_id) if context else None
 
         def _human() -> None:
-            print(f"Anchor session: {session_id} (sandbox {sandbox_id})\n")
-            if bundle:
-                agentcontext.render(bundle)
+            print(f"Anchor session: {session_id} (sandbox {sandbox_id})")
 
         payload: Dict[str, Any] = {
             "session_id": session_id,
             "sandbox_id": sandbox_id,
         }
-        if bundle:
-            payload["context"] = bundle
         emit(payload, _human)
 
     def current(self) -> None:
         """Show the current anchor session, where it came from, and its app URL."""
         client = _client_or_exit()
         session_id, sandbox_id, source = client.anchor()
-        # Carried here as well as in the bundle: this is the command an agent
+        # Carried here as well as in `context`: this is the command an agent
         # runs when it already has a session and just needs to know which, and
         # a link it cannot get here is a link it will try to build itself.
-        link = agentcontext.urls(client, session_id)
+        link = _session_urls(client, session_id)
 
         def _human() -> None:
             if not session_id:
@@ -180,31 +213,21 @@ class SessionCommands:
             _human,
         )
 
-    def use(self, session_id: str, context: bool = False) -> None:
-        """Point remote commands at an existing session id.
-
-        Pass --context to also print the context bundle (usage notes +
-        current skills index).
-        """
+    def use(self, session_id: str) -> None:
+        """Point remote commands at an existing session id."""
         client = _client_or_exit()
         sandbox_id = _run(client.ensure_sandbox)
         if not _run(client.session_exists, sandbox_id, session_id):
             fail(f"session {session_id} not found in sandbox {sandbox_id}")
         update_state(client.state_key, sandbox_id=sandbox_id, session_id=session_id)
-        bundle = agentcontext.build(client, sandbox_id, session_id) if context else None
 
         def _human() -> None:
             print(f"Anchor session set to {session_id}")
-            if bundle:
-                print()
-                agentcontext.render(bundle)
 
         payload: Dict[str, Any] = {
             "session_id": session_id,
             "sandbox_id": sandbox_id,
         }
-        if bundle:
-            payload["context"] = bundle
         emit(payload, _human)
 
     def list(self, page_size: int = 20) -> None:
