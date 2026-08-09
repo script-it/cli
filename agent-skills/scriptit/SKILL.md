@@ -131,6 +131,6 @@ it and say so. Script.it Cloud only; on an on-prem deployment the command
 explains why it can't.
 
 The session is attributed to whichever harness is driving it: the CLI reads the
-marker your host already sets (`CLAUDECODE`, `CODEX_SANDBOX`,
+marker your host already sets (`CLAUDECODE`, `CODEX_THREAD_ID`/`CODEX_SANDBOX`,
 `CURSOR_TRACE_ID`, `GEMINI_CLI`, ...). Only if you are none of those does it
 need telling — `export SCRIPTIT_CLIENT=<your-slug>` before step 2.

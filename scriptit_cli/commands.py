@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 from scriptit_cli import MIN_SANDBOX_CLI_VERSION
 from scriptit_cli.analytics import analytics
+from scriptit_cli.client import detect_client
 from scriptit_cli.errors import ScriptItError
 from scriptit_cli.output import emit, fail
 from scriptit_cli.remote import ENV_SESSION, RemoteClient, update_state
@@ -96,6 +97,9 @@ def show_context() -> None:
         fail("no current session; run `scriptit session new` first")
     if not _run(client.session_exists, sandbox_id, session_id):
         fail(f"session {session_id} not found in sandbox {sandbox_id}")
+    attributed_client = _run(client.ensure_session_attribution, sandbox_id, session_id)
+    if attributed_client:
+        update_state(client.state_key, client=attributed_client)
     bundle = _run(_fetch_context_bundle, client, sandbox_id, session_id)
     emit(bundle, lambda: print(bundle["markdown"]))
 
@@ -179,7 +183,12 @@ class SessionCommands:
         client = _client_or_exit()
         sandbox_id = _run(client.ensure_sandbox)
         session_id = _run(client.create_session, sandbox_id)
-        update_state(client.state_key, sandbox_id=sandbox_id, session_id=session_id)
+        update_state(
+            client.state_key,
+            sandbox_id=sandbox_id,
+            session_id=session_id,
+            client=detect_client(),
+        )
         # The funnel's first real step: a harness that gets this far has a
         # working credential and a live sandbox to drive.
         analytics.track("cli_session_created")
@@ -228,7 +237,13 @@ class SessionCommands:
         sandbox_id = _run(client.ensure_sandbox)
         if not _run(client.session_exists, sandbox_id, session_id):
             fail(f"session {session_id} not found in sandbox {sandbox_id}")
-        update_state(client.state_key, sandbox_id=sandbox_id, session_id=session_id)
+        attributed_client = _run(client.ensure_session_attribution, sandbox_id, session_id)
+        update_state(
+            client.state_key,
+            sandbox_id=sandbox_id,
+            session_id=session_id,
+            client=attributed_client,
+        )
 
         def _human() -> None:
             print(f"Anchor session set to {session_id}")

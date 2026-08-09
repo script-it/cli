@@ -416,7 +416,13 @@ def test_agent_context_is_required_unless_context_was_explicitly_disabled() -> N
 class _FakeClient:
     def __init__(self, app_url: str) -> None:
         self.app_url = app_url
+        self.state_key = "test"
         self.context_data = None
+        self.attribution_calls = []
+
+    def ensure_session_attribution(self, sandbox_id, session_id):
+        self.attribution_calls.append((sandbox_id, session_id))
+        return "codex"
 
     def shell(self, command, **kwargs):
         from scriptit_cli import commands
@@ -475,6 +481,7 @@ def test_context_command_uses_current_session_and_renders_sandbox_markdown(
 
     commands.show_context()
     assert capsys.readouterr().out == "SERVER-RENDERED CONTEXT\n"
+    assert fake.attribution_calls == [("sbx_1", "ses_42")]
 
 
 def test_context_command_requires_an_explicit_current_session(monkeypatch, capsys) -> None:
@@ -756,6 +763,66 @@ def test_named_session_that_is_gone_is_an_error_not_a_replacement(
 
     with pytest.raises(remote.RemoteError, match="ses_missing"):
         client.ensure_session("sb")
+
+
+def test_existing_anchor_reapplies_and_persists_detected_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client.profile, client.api_url = "default", "http://x"
+    client.state_key = "default:http://x"
+    remote.update_state(
+        client.state_key,
+        session_id="ses_existing",
+        sandbox_id="sb",
+        client=None,
+    )
+    monkeypatch.setattr(remote, "detect_client", lambda: "codex")
+    monkeypatch.setattr(remote.RemoteClient, "session_exists", lambda *a: True)
+    calls = []
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return _Response()
+
+    client.request = request
+
+    assert client.ensure_session("sb") == "ses_existing"
+    assert calls[0][2]["json"] == {"add": ["cli", "client:codex"]}
+    assert remote.load_state(client.state_key)["client"] == "codex"
+
+
+def test_session_attribution_falls_back_to_the_client_bound_to_that_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client.profile, client.api_url = "default", "http://x"
+    client.state_key = "default:http://x"
+    remote.update_state(
+        client.state_key,
+        session_id="ses_existing",
+        sandbox_id="sb",
+        client="codex",
+    )
+    monkeypatch.setattr(remote, "detect_client", lambda: None)
+    seen = {}
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+    def request(method, path, **kwargs):
+        seen.update(kwargs)
+        return _Response()
+
+    client.request = request
+
+    assert client.ensure_session_attribution("sb", "ses_existing") == "codex"
+    assert seen["json"] == {"add": ["cli", "client:codex"]}
 
 
 # ---------------------------------------------------------------------------

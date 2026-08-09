@@ -18,6 +18,7 @@ from typing import List, Optional, Tuple
 _CLIENT_ENV_MARKERS: List[Tuple[str, str]] = [
     ("CLAUDECODE", "claude-code"),
     ("CLAUDE_CODE_ENTRYPOINT", "claude-code"),
+    ("CODEX_THREAD_ID", "codex"),
     ("CODEX_SANDBOX", "codex"),
     ("CURSOR_TRACE_ID", "cursor"),
     ("GEMINI_CLI", "gemini-cli"),
