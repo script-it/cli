@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from scriptit_cli import errors, remote, remote_auth, util
+from scriptit_cli import client, errors, remote, remote_auth, util
 
 SENTINEL = "__SCRIPTIT_CLI_EXIT_deadbeefdeadbeef__:"
 LOG_PATH = "data_files/.scriptit-cli-deadbeefdeadbeef.log"
@@ -1311,17 +1311,15 @@ def test_a_known_harness_needs_no_manual_declaration() -> None:
     silently no-ops when skipped."""
     import os
 
-    from scriptit_cli.remote import _CLIENT_ENV_MARKERS, detect_client
-
-    for var, slug in _CLIENT_ENV_MARKERS:
-        env = {k: v for k, v in os.environ.items() if k not in dict(_CLIENT_ENV_MARKERS)}
+    for var, slug in client._CLIENT_ENV_MARKERS:
+        env = {k: v for k, v in os.environ.items() if k not in dict(client._CLIENT_ENV_MARKERS)}
         env.pop("SCRIPTIT_CLIENT", None)
         env[var] = "1"
         old = dict(os.environ)
         os.environ.clear()
         os.environ.update(env)
         try:
-            assert detect_client() == slug, var
+            assert client.detect_client() == slug, var
         finally:
             os.environ.clear()
             os.environ.update(old)
@@ -1355,3 +1353,160 @@ def test_the_entry_point_skill_stays_a_bootstrap() -> None:
     ):
         assert topic in bundle, f"the bundle should own {topic!r}"
         assert topic not in skill, f"{topic!r} is duplicated in the skill"
+
+
+# ---------------------------------------------------------------------------
+# CLI → browser session handoff (`scriptit auth browser-url`)
+# ---------------------------------------------------------------------------
+
+
+class _HandoffResp:
+    def __init__(self, status: int = 200, body: object = None, text: str = "") -> None:
+        self.status_code = status
+        self._body = body if body is not None else {"code": "CODE123", "expires_in": 60}
+        self.text = text
+
+    def json(self):
+        if isinstance(self._body, Exception):
+            raise self._body
+        return self._body
+
+
+def _logged_in(monkeypatch, **overrides) -> None:
+    creds = {
+        "mode": "firebase",
+        "api_url": "https://api.example.test",
+        "app_url": "https://app.example.test",
+        "firebase_api_key": "k",
+        "refresh_token": "r",
+        "id_token": "tok",
+        "id_token_expires_at": time.time() + 3600,
+        **overrides,
+    }
+    remote_auth.save_credentials(creds)
+
+
+def test_the_handoff_code_rides_in_the_fragment(monkeypatch, capsys) -> None:
+    """Never the query string. A fragment is not sent to any server, so the
+    code stays out of access logs and out of any Referer the next page sends —
+    which is the only reason it is safe to put a live credential in a URL an
+    agent will paste around."""
+    from scriptit_cli.auth import AuthCommands
+
+    _logged_in(monkeypatch)
+    monkeypatch.setattr("scriptit_cli.auth.requests.post", lambda *a, **k: _HandoffResp())
+
+    AuthCommands().browser_url(next="/app/s/ses_42")
+    url = capsys.readouterr().out.strip()
+
+    assert url.startswith("https://app.example.test/app/cli-handoff#")
+    assert "?code=" not in url
+    assert url.split("#", 1)[1] == "code=CODE123&next=/app/s/ses_42"
+
+
+def test_the_handoff_reports_the_harness_that_asked(monkeypatch) -> None:
+    """Attribution only — the backend records it and renders it as reported,
+    never as verified, because anything self-reported is chosen by whoever is
+    calling."""
+    from scriptit_cli.auth import AuthCommands
+
+    _logged_in(monkeypatch)
+    monkeypatch.setenv("SCRIPTIT_CLIENT", "claude-code")
+    seen: dict = {}
+
+    def fake_post(url, **kwargs):
+        seen.update(kwargs)
+        return _HandoffResp()
+
+    monkeypatch.setattr("scriptit_cli.auth.requests.post", fake_post)
+    AuthCommands().browser_url()
+
+    assert seen["json"] == {"client": "claude-code"}
+    assert seen["headers"]["Authorization"] == "Bearer tok"
+
+
+def test_a_deployment_that_cannot_do_handoff_says_so_verbatim(monkeypatch, capsys) -> None:
+    """Keycloak deployments answer 409 because the handoff is unimplementable
+    there, not merely unimplemented. The backend's wording is the useful part,
+    so it is passed through rather than replaced with a guess."""
+    from scriptit_cli.auth import AuthCommands
+
+    _logged_in(monkeypatch)
+    monkeypatch.setattr(
+        "scriptit_cli.auth.requests.post",
+        lambda *a, **k: _HandoffResp(
+            409, {"detail": "browser handoff is not available on this deployment"}
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        AuthCommands().browser_url()
+    assert "not available on this deployment" in capsys.readouterr().err
+
+
+def test_a_non_json_handoff_error_still_reports_cleanly(monkeypatch, capsys) -> None:
+    """A proxy answering HTML must read as a failed command, not a traceback."""
+    from scriptit_cli.auth import AuthCommands
+
+    _logged_in(monkeypatch)
+    monkeypatch.setattr(
+        "scriptit_cli.auth.requests.post",
+        lambda *a, **k: _HandoffResp(502, ValueError("no json"), text="<html>502</html>"),
+    )
+
+    with pytest.raises(SystemExit):
+        AuthCommands().browser_url()
+    assert "502" in capsys.readouterr().err
+
+
+def test_the_handoff_url_is_the_only_thing_on_stdout(monkeypatch, capsys) -> None:
+    """The warning about what the URL is worth goes to stderr, so `$(...)`
+    around this command captures a usable URL and nothing else."""
+    from scriptit_cli.auth import AuthCommands
+
+    _logged_in(monkeypatch)
+    monkeypatch.setattr("scriptit_cli.auth.requests.post", lambda *a, **k: _HandoffResp())
+
+    AuthCommands().browser_url()
+    out, err = capsys.readouterr()
+
+    assert out.strip().startswith("https://")
+    assert "\n" not in out.strip()
+    assert "works once" in err
+
+
+def test_a_login_with_no_recorded_app_origin_is_refused(monkeypatch, capsys) -> None:
+    """Building the URL against a guessed host would send the code to whatever
+    that host turned out to be."""
+    from scriptit_cli.auth import AuthCommands
+
+    _logged_in(monkeypatch, app_url="")
+
+    with pytest.raises(SystemExit):
+        AuthCommands().browser_url()
+    assert "no browser origin" in capsys.readouterr().err
+
+
+def test_handoff_requires_a_login(capsys) -> None:
+    from scriptit_cli.auth import AuthCommands
+
+    with pytest.raises(SystemExit):
+        AuthCommands().browser_url()
+    assert "not logged in" in capsys.readouterr().err
+
+
+def test_login_does_not_pop_a_window_when_an_agent_is_driving(monkeypatch) -> None:
+    """A harness has its own browser and cannot see the one webbrowser.open
+    launches — so opening it puts the login page in front of the human while
+    the agent, which is the caller, learns nothing. The URL is printed instead
+    and whoever is driving decides."""
+    from scriptit_cli.auth import _should_open_browser
+
+    for var, _slug in client._CLIENT_ENV_MARKERS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("SCRIPTIT_CLIENT", raising=False)
+    assert _should_open_browser(no_browser=False) is True
+    assert _should_open_browser(no_browser=True) is False
+
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert _should_open_browser(no_browser=False) is False

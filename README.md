@@ -71,7 +71,9 @@ scriptit auth login
 On a machine with no browser (SSH, a container), add `--manual` and paste the
 code it asks for. For an on-prem deployment, add
 `--api-url https://<your-deployment>` — the CLI reads the auth mode from it and
-switches to a device-code flow by itself.
+switches to a device-code flow by itself. When a coding agent runs this, the
+CLI prints the URL instead of opening a window — the agent's browser is not the
+one that would have opened. `--no-browser` forces that anywhere.
 
 **4. See what you have, then run one.** `skills list` is the index of your
 scripts (alongside the platform's own skills); `start` takes a bare name from
@@ -118,6 +120,13 @@ scriptit auth logout
   [Use it from a coding agent](#use-it-from-a-coding-agent).
 - **Stay in the terminal.** Run a script, tail its logs, check a trigger, move a
   file, without switching to the browser.
+- **Let an agent show you its work, not just describe it.**
+  `scriptit auth browser-url --next <path>` prints a one-time link that opens
+  straight to a script or run in the app, already signed in. An agent with a
+  browser you can see opens it there itself — so when it finishes something you
+  watch the block tree and its outputs come up instead of reading a paragraph
+  about them. The link lends this machine's login, lives 60 seconds and works
+  once; you get an email whenever one is used from somewhere new.
 - **Script your scripts.** The commands this client answers speak `--json`, so
   you can wire Script.it into whatever you already automate with.
 

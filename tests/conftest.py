@@ -17,6 +17,24 @@ def isolate_scriptit_config_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_output_mode():
+    """Return the output layer to human mode between tests.
+
+    ``--json`` is process-global state set by ``main``, so a test that drives
+    an invocation carrying the flag leaves every later test writing results as
+    JSON on stdout and errors there too. That silently inverts what any
+    subsequent stdout/stderr assertion is looking at.
+    """
+    from scriptit_cli import output
+
+    output.set_json_mode(False)
+    output._emitted = False
+    yield
+    output.set_json_mode(False)
+    output._emitted = False
+
+
+@pytest.fixture(autouse=True)
 def reset_analytics(monkeypatch):
     """Unbind the analytics singleton between tests.
 

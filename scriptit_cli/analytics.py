@@ -30,7 +30,10 @@ import platform
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
+import requests
+
 from scriptit_cli import __version__
+from scriptit_cli.client import detect_client
 
 ENDPOINT = "/api/v1/telemetry"
 
@@ -189,8 +192,6 @@ class Analytics:
     def track(self, event: str, **properties: Any) -> None:
         if not self.enabled:
             return
-        from scriptit_cli.remote import detect_client
-
         self._events.append(
             {
                 "event_name": event,
@@ -211,8 +212,6 @@ class Analytics:
     def _post(self) -> None:
         """Ship the buffer. One request per event — the sink takes one at a
         time, and a run emits one or two."""
-        import requests
-
         token = self._token
         if token is None:  # unreachable: `enabled` gates every caller
             return
