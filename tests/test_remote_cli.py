@@ -490,6 +490,43 @@ def test_context_command_requires_an_explicit_current_session(monkeypatch, capsy
     assert "scriptit session new" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("workspaces/ws/team/script", "/workspaces/ws/team/script"),
+        ("/workspaces/ws/team/script", "/workspaces/ws/team/script"),
+    ],
+)
+def test_fs_paths_are_canonicalized_before_transport(path: str, expected: str) -> None:
+    from scriptit_cli import commands
+
+    assert commands._canonical_fs_path(path) == expected
+
+
+def test_fs_push_sends_and_reports_the_canonical_remote_path(monkeypatch, capsys) -> None:
+    from scriptit_cli import commands
+
+    calls: list[tuple[str, str, str]] = []
+
+    class _FsClient:
+        @staticmethod
+        def ensure_sandbox() -> str:
+            return "sbx_1"
+
+        @staticmethod
+        def fs_upload(sandbox_id: str, remote: str, local: str) -> None:
+            calls.append((sandbox_id, remote, local))
+
+    monkeypatch.setattr(commands, "_client_or_exit", _FsClient)
+
+    commands.FsCommands().push("report.csv", "workspaces/ws/report.csv")
+
+    assert calls == [("sbx_1", "/workspaces/ws/report.csv", "report.csv")]
+    assert capsys.readouterr().out == (
+        "Pushed report.csv -> /workspaces/ws/report.csv\n"
+    )
+
+
 def test_session_new_only_creates_the_session(monkeypatch, capsys) -> None:
     from scriptit_cli import commands
 
