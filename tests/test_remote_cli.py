@@ -529,9 +529,7 @@ def test_fs_push_sends_and_reports_the_canonical_remote_path(monkeypatch, capsys
     commands.FsCommands().push("report.csv", "workspaces/ws/report.csv")
 
     assert calls == [("sbx_1", "/workspaces/ws/report.csv", "report.csv")]
-    assert capsys.readouterr().out == (
-        "Pushed report.csv -> /workspaces/ws/report.csv\n"
-    )
+    assert capsys.readouterr().out == ("Pushed report.csv -> /workspaces/ws/report.csv\n")
 
 
 def test_session_new_only_creates_the_session(monkeypatch, capsys) -> None:
