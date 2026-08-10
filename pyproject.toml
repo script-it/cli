@@ -39,9 +39,9 @@ dev = ["pytest>=7.0", "ruff>=0.6"]
 
 [project.urls]
 Homepage = "https://script.it"
-Source = "https://github.com/bespo-ai/script.it-cli"
-Issues = "https://github.com/bespo-ai/script.it-cli/issues"
-Changelog = "https://github.com/bespo-ai/script.it-cli/releases"
+Source = "https://github.com/script-it/cli"
+Issues = "https://github.com/script-it/cli/issues"
+Changelog = "https://github.com/script-it/cli/releases"
 
 [project.scripts]
 scriptit = "scriptit_cli.main:main"

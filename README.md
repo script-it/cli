@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/scriptit-cli.svg)](https://pypi.org/project/scriptit-cli/)
 [![Python](https://img.shields.io/pypi/pyversions/scriptit-cli.svg)](https://pypi.org/project/scriptit-cli/)
 -->
-[![CI](https://github.com/bespo-ai/script.it-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/bespo-ai/script.it-cli/actions/workflows/ci.yml)
+[![CI](https://github.com/script-it/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/script-it/cli/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
@@ -41,7 +41,7 @@ with `--api-url`.
 dependencies never mix with a project's:
 
 ```bash
-uv tool install git+https://github.com/bespo-ai/script.it-cli.git
+uv tool install git+https://github.com/script-it/cli.git
 ```
 
 Installing from git while the package is pre-release; a `pip install
@@ -52,10 +52,10 @@ scriptit-cli` will replace this once it is published.
 
 ```bash
 # pipx — same isolation as uv tool
-pipx install git+https://github.com/bespo-ai/script.it-cli.git
+pipx install git+https://github.com/script-it/cli.git
 
 # plain pip, into whatever environment is active
-pip install git+https://github.com/bespo-ai/script.it-cli.git
+pip install git+https://github.com/script-it/cli.git
 ```
 
 Prefer `uv tool` or `pipx`: they keep the CLI and its dependencies out of
@@ -101,7 +101,7 @@ to drive your workspace:
 
 ```bash
 mkdir -p ~/.claude/skills/scriptit
-curl -sSL https://raw.githubusercontent.com/bespo-ai/script.it-cli/main/agent-skills/scriptit/SKILL.md \
+curl -sSL https://raw.githubusercontent.com/script-it/cli/main/agent-skills/scriptit/SKILL.md \
   -o ~/.claude/skills/scriptit/SKILL.md
 ```
 
@@ -325,7 +325,7 @@ for setup and the one architectural rule this repo keeps.
 ## Security
 
 Found a vulnerability? Please report it privately through GitHub's
-[**Report a vulnerability**](https://github.com/bespo-ai/script.it-cli/security/advisories/new)
+[**Report a vulnerability**](https://github.com/script-it/cli/security/advisories/new)
 form rather than opening an issue — see [SECURITY.md](SECURITY.md).
 
 ## License
