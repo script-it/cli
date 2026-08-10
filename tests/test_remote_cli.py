@@ -349,28 +349,13 @@ def test_device_login_requests_openid_and_prefers_id_token(monkeypatch: pytest.M
 # ---------------------------------------------------------------------------
 
 
-def test_context_probe_collects_only_live_platform_data() -> None:
-    from scriptit_cli import commands
-
-    assert commands._CONTEXT_PROBE.count(commands._CONTEXT_MARKER) == 2
-    assert "scriptit version" in commands._CONTEXT_PROBE
-    assert "scriptit integrations list" in commands._CONTEXT_PROBE
-    assert "scriptit skills list" in commands._CONTEXT_PROBE
-    assert "/workspaces" not in commands._CONTEXT_PROBE
-    assert "cat " not in commands._CONTEXT_PROBE
-
-
 def test_agent_context_posts_live_data_to_the_authenticated_sandbox_proxy() -> None:
     client = remote.RemoteClient.__new__(remote.RemoteClient)
     seen = {}
     context_data = {
         "session_id": "ses_42",
         "session_url": None,
-        "integrations_url": None,
-        "sandbox_version": "scriptit 9.9.9",
         "minimum_sandbox_version": "0.2.0",
-        "integrations": "github",
-        "skills": "reporting",
     }
 
     class _Response:
@@ -424,12 +409,6 @@ class _FakeClient:
         self.attribution_calls.append((sandbox_id, session_id))
         return "codex"
 
-    def shell(self, command, **kwargs):
-        from scriptit_cli import commands
-
-        marker = commands._CONTEXT_MARKER
-        return (f"scriptit 9.9.9\n{marker}\ngithub connected\n{marker}\nsome-skill\n", 0)
-
     def agent_context(self, sandbox_id, context_data):
         self.context_data = context_data
         return {
@@ -441,19 +420,19 @@ class _FakeClient:
         }
 
 
-def test_context_bundle_sends_urls_and_live_data_to_the_sandbox() -> None:
+def test_context_bundle_sends_only_client_owned_fields() -> None:
     from scriptit_cli import commands
 
     client = _FakeClient("https://app.example.test")
     bundle = commands._fetch_context_bundle(client, "sbx_1", "ses_42")
 
-    assert client.context_data["session_url"] == "https://app.example.test/app/s/ses_42"
-    assert client.context_data["integrations_url"].endswith(
-        "/integrations/connect/<integration-id>?view=companion"
-    )
-    assert client.context_data["sandbox_version"] == "scriptit 9.9.9"
-    assert client.context_data["integrations"] == "github connected"
-    assert client.context_data["skills"] == "some-skill"
+    # The sandbox owns integrations, skills, its own version, and the
+    # connect URL; the client contributes only these three fields.
+    assert client.context_data == {
+        "session_id": "ses_42",
+        "session_url": "https://app.example.test/app/s/ses_42",
+        "minimum_sandbox_version": commands.MIN_SANDBOX_CLI_VERSION,
+    }
     assert bundle["markdown"] == "SERVER-RENDERED CONTEXT"
 
 
