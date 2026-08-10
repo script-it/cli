@@ -12,6 +12,6 @@ __version__ = "0.1.0"
 # `scriptit start <name>` resolution. The sandbox's CLI ships inside the
 # sandbox image on the platform's release schedule, independently of this
 # package, so `session new` checks it and says so once when it is older.
-MIN_SANDBOX_CLI_VERSION = "0.2.0"
+MIN_SANDBOX_CLI_VERSION = "0.2.1"
 
 __all__ = ["MIN_SANDBOX_CLI_VERSION", "__version__"]
