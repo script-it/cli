@@ -19,25 +19,10 @@ from scriptit_cli.errors import ScriptItError
 from scriptit_cli.output import emit, fail
 from scriptit_cli.remote import ENV_SESSION, RemoteClient, update_state
 
-_CONTEXT_MARKER = "===SCRIPTIT-CONTEXT-SPLIT==="
-_CONTEXT_PROBE = (
-    "scriptit version 2>&1;"
-    f" echo '{_CONTEXT_MARKER}';"
-    " scriptit integrations list 2>/dev/null;"
-    f" echo '{_CONTEXT_MARKER}'; scriptit skills list 2>&1"
-)
-
 
 def _session_urls(client: RemoteClient, session_id: Optional[str]) -> Dict[str, Optional[str]]:
     session_url = f"{client.app_url}/app/s/{session_id}" if client.app_url and session_id else None
-    return {
-        "session_url": session_url,
-        "integrations_url": (
-            f"{session_url}/integrations/connect/<integration-id>?view=companion"
-            if session_url
-            else None
-        ),
-    }
+    return {"session_url": session_url}
 
 
 def _fetch_context_bundle(
@@ -45,24 +30,14 @@ def _fetch_context_bundle(
     sandbox_id: str,
     session_id: str,
 ) -> Dict[str, Any]:
-    output, _ = client.shell(
-        _CONTEXT_PROBE,
-        sandbox_id=sandbox_id,
-        session_id=session_id,
-        timeout_s=120.0,
-        echo=False,
-    )
-    if output.count(_CONTEXT_MARKER) != 2:
-        raise ScriptItError("sandbox context probe returned an incomplete response")
-    version_output, _, remainder = output.partition(_CONTEXT_MARKER)
-    integrations, _, skills = remainder.partition(_CONTEXT_MARKER)
+    # The sandbox assembles the briefing from its own state (integrations,
+    # skills, its CLI version, mounted workspaces); this side contributes
+    # only what the sandbox cannot know — which session, the app origin the
+    # client logged into, and the client's compatibility floor.
     context_data: Dict[str, Any] = {
         "session_id": session_id,
         **_session_urls(client, session_id),
-        "sandbox_version": version_output.strip() or None,
         "minimum_sandbox_version": MIN_SANDBOX_CLI_VERSION,
-        "integrations": integrations.strip() or None,
-        "skills": skills.strip() or None,
     }
     return client.agent_context(sandbox_id, context_data)
 
