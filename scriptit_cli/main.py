@@ -19,7 +19,7 @@ import fire
 from scriptit_cli import __version__, output, update_check
 from scriptit_cli.analytics import analytics, safe_command
 from scriptit_cli.auth import AuthCommands
-from scriptit_cli.commands import FsCommands, SandboxCommands, SessionCommands
+from scriptit_cli.commands import FsCommands, SandboxCommands, SessionCommands, show_context
 from scriptit_cli.output import emit, set_json_mode, warn
 from scriptit_cli.remote import CLIENT_COMMANDS, remote_dispatch_if_applicable, remote_exec
 
@@ -29,7 +29,7 @@ JSON_FLAG = "--json"
 # Commands whose output this client formats, so `--json` is ours to read.
 # `exec` is absent on purpose: everything after it is the user's command, and
 # consuming a `--json` out of it would change what runs.
-JSON_COMMANDS = frozenset({"auth", "fs", "session", "sandbox", "version"})
+JSON_COMMANDS = frozenset({"auth", "context", "fs", "session", "sandbox", "version"})
 
 # ...minus the ones inside those groups that stream raw bytes instead of
 # returning a result. `fs read` writes the file unmodified, which is the point
@@ -75,7 +75,8 @@ class ScriptIt:
         scriptit describe --concepts           # the platform reference
 
     Move files and manage the session:
-        scriptit fs ls|read|write|push|pull
+        scriptit fs read|write|push|pull
+        scriptit context                     # fetch agent instructions
         scriptit session new|use|current|list
         scriptit sandbox status|wake
 
@@ -90,6 +91,10 @@ class ScriptIt:
         self.fs = FsCommands()
         self.session = SessionCommands()
         self.sandbox = SandboxCommands()
+
+    def context(self) -> None:
+        """Fetch the complete agent context for the current session."""
+        show_context()
 
     def version(self) -> None:
         """Print this client's version."""

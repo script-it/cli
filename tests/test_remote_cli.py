@@ -345,120 +345,209 @@ def test_device_login_requests_openid_and_prefers_id_token(monkeypatch: pytest.M
 
 
 # ---------------------------------------------------------------------------
-# CLI / sandbox version skew
+# Sandbox-assembled session context
 # ---------------------------------------------------------------------------
 
 
-def test_version_skew_warns_only_when_the_sandbox_is_older() -> None:
-    """The sandbox executes the forwarded verb with its OWN CLI, shipped in the
-    sandbox image and released separately from this client — so the versions
-    differ routinely and only an older sandbox is worth a word. An equality
-    check here would fire on every session."""
-    from scriptit_cli import MIN_SANDBOX_CLI_VERSION
-    from scriptit_cli import agentcontext as ac
+def test_agent_context_posts_live_data_to_the_authenticated_sandbox_proxy() -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    seen = {}
+    context_data = {
+        "session_id": "ses_42",
+        "session_url": None,
+        "minimum_sandbox_version": "0.2.0",
+    }
 
-    assert ac.skew_warning(f"scriptit {MIN_SANDBOX_CLI_VERSION}") is None
-    assert ac.skew_warning("scriptit 9.9.9") is None
-    warning = ac.skew_warning("scriptit 0.1.9")
-    assert warning and "0.1.9" in warning and MIN_SANDBOX_CLI_VERSION in warning
-    # Never guess from unparseable output — an error there is not a skew claim.
-    assert ac.skew_warning("scriptit: command not found") is None
-    assert ac.skew_warning("") is None
+    class _Response:
+        status_code = 200
+        text = ""
 
+        @staticmethod
+        def json():
+            return {
+                "schema_version": 1,
+                "revision": "abc123",
+                "instructions": "sandbox instructions",
+                "markdown": "sandbox markdown",
+            }
 
-def test_context_probe_emits_every_section() -> None:
-    """The bundle is one dispatch split on a marker; a missing section would
-    silently shift the others (version text landing in the integrations slot)."""
-    from scriptit_cli import agentcontext as ac
+    def fake_request(method, path, **kwargs):
+        seen.update({"method": method, "path": path, **kwargs})
+        return _Response()
 
-    assert ac.PROBE.count(ac.MARKER) == 2
-    assert "scriptit version" in ac.PROBE
-    assert "scriptit integrations list" in ac.PROBE
-    assert "scriptit skills list" in ac.PROBE
-
-
-def test_the_context_probe_only_calls_platform_verbs() -> None:
-    """Every section comes from a verb, never from a path inside the sandbox.
-
-    Reading a file the platform keeps for its own agent would make a client on
-    someone's laptop depend on where that file lives — and silently, since the
-    probe discards stderr, so a move would surface as an agent that quietly
-    stopped knowing what was connected.
-    """
-    from scriptit_cli import agentcontext as ac
-
-    assert "/workspaces" not in ac.PROBE
-    assert "cat " not in ac.PROBE
+    client.request = fake_request
+    assert client.agent_context("sbx_1", context_data)["markdown"] == "sandbox markdown"
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/sandbox/sbx_1/proxy/agent-context",
+        "json": context_data,
+        "wake_on_503": False,
+        "timeout": 30,
+    }
 
 
-# ---------------------------------------------------------------------------
-# The app links in the context bundle
-# ---------------------------------------------------------------------------
+def test_agent_context_is_required_unless_context_was_explicitly_disabled() -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+
+    class _Response:
+        status_code = 404
+        text = "not found"
+
+    client.request = lambda *args, **kwargs: _Response()
+    with pytest.raises(remote.RemoteError, match="agent context unavailable"):
+        client.agent_context("sbx_1", {})
 
 
 class _FakeClient:
-    """Enough of RemoteClient for _context_bundle: an app origin and a shell."""
-
     def __init__(self, app_url: str) -> None:
         self.app_url = app_url
+        self.state_key = "test"
+        self.context_data = None
+        self.attribution_calls = []
 
-    def shell(self, command, **kwargs):
-        from scriptit_cli import agentcontext as ac
+    def ensure_session_attribution(self, sandbox_id, session_id):
+        self.attribution_calls.append((sandbox_id, session_id))
+        return "codex"
 
-        m = ac.MARKER
-        return (f"scriptit 9.9.9\n{m}\nno integrations\n{m}\nsome-skill\n", 0)
-
-
-def test_the_bundle_points_at_this_session_in_the_app() -> None:
-    """The agent is told the URL rather than left to reconstruct it.
-
-    The route shape (`/app/s/<session>/workspaces/<wid>/<rel>`) is the app's,
-    not this client's, so a guess made in the harness would be a guess about
-    someone else's routing.
-    """
-    from scriptit_cli import agentcontext as ac
-
-    bundle = ac.build(_FakeClient("https://app.example.test"), "sbx_1", "ses_42")
-    assert bundle["session_url"] == "https://app.example.test/app/s/ses_42"
-    assert bundle["session_url"] in bundle["links"]
-    # The script link is that URL plus the path as it appears under /workspaces.
-    assert f"{bundle['session_url']}/workspaces/" in bundle["links"]
+    def agent_context(self, sandbox_id, context_data):
+        self.context_data = context_data
+        return {
+            "schema_version": 1,
+            "revision": "abc123",
+            "instructions": "owned by sandbox",
+            "markdown": "SERVER-RENDERED CONTEXT",
+            **context_data,
+        }
 
 
-def test_the_bundle_points_at_where_integrations_get_connected() -> None:
-    """Connecting is a browser flow, so the agent needs somewhere to send the
-    user — and `?settings=integrations` is the app's own deep link for it."""
-    from scriptit_cli import agentcontext as ac
+def test_context_bundle_sends_only_client_owned_fields() -> None:
+    from scriptit_cli import commands
 
-    bundle = ac.build(_FakeClient("https://app.example.test"), "sbx_1", "ses_42")
-    assert bundle["integrations_url"] == (
-        "https://app.example.test/app/s/ses_42?settings=integrations"
+    client = _FakeClient("https://app.example.test")
+    bundle = commands._fetch_context_bundle(client, "sbx_1", "ses_42")
+
+    # The sandbox owns integrations, skills, its own version, and the
+    # connect URL; the client contributes only these three fields.
+    assert client.context_data == {
+        "session_id": "ses_42",
+        "session_url": "https://app.example.test/app/s/ses_42",
+        "minimum_sandbox_version": commands.MIN_SANDBOX_CLI_VERSION,
+    }
+    assert bundle["markdown"] == "SERVER-RENDERED CONTEXT"
+
+
+def test_session_urls_require_an_authoritative_app_origin() -> None:
+    from scriptit_cli import commands
+
+    links = commands._session_urls(_FakeClient("https://app.example.test"), "ses_42")
+    assert links["session_url"] == "https://app.example.test/app/s/ses_42"
+    assert commands._session_urls(_FakeClient(""), "ses_42")["session_url"] is None
+    assert (
+        commands._session_urls(_FakeClient("https://app.example.test"), None)["session_url"] is None
     )
-    assert bundle["integrations_url"] in bundle["links"]
 
 
-def test_the_links_are_available_without_a_round_trip() -> None:
-    """`session current` reports them too, so an agent holding a session id
-    never has to rebuild a route this client does not own. Deriving them costs
-    no shell dispatch, which is why every session-reporting command can."""
-    from scriptit_cli import agentcontext as ac
+def test_context_command_uses_current_session_and_renders_sandbox_markdown(
+    monkeypatch, capsys
+) -> None:
+    from scriptit_cli import commands
 
-    link = ac.urls(_FakeClient("https://app.example.test"), "ses_42")
-    assert link["session_url"] == "https://app.example.test/app/s/ses_42"
-    assert link["integrations_url"].endswith("?settings=integrations")
-    # No anchor session yet — nothing to link to.
-    assert ac.urls(_FakeClient("https://app.example.test"), None)["session_url"] is None
+    fake = _FakeClient("https://app.example.test")
+    fake.ensure_sandbox = lambda: "sbx_1"
+    fake.anchor = lambda: ("ses_42", "sbx_1", "state")
+    fake.session_exists = lambda sandbox_id, session_id: True
+    monkeypatch.setattr(commands, "_client_or_exit", lambda: fake)
+
+    commands.show_context()
+    assert capsys.readouterr().out == "SERVER-RENDERED CONTEXT\n"
+    assert fake.attribution_calls == [("sbx_1", "ses_42")]
 
 
-def test_a_deployment_with_no_app_origin_gets_no_link() -> None:
-    """Better no link than a fabricated one pointing at the wrong host."""
-    from scriptit_cli import agentcontext as ac
+def test_context_command_requires_an_explicit_current_session(monkeypatch, capsys) -> None:
+    from scriptit_cli import commands
 
-    bundle = ac.build(_FakeClient(""), "sbx_1", "ses_42")
-    assert bundle["session_url"] is None
-    assert bundle["integrations_url"] is None
-    assert bundle["links"] is None
-    ac.render(bundle)  # must not raise on the missing section
+    fake = _FakeClient("https://app.example.test")
+    fake.ensure_sandbox = lambda: "sbx_1"
+    fake.anchor = lambda: (None, None, "none")
+    monkeypatch.setattr(commands, "_client_or_exit", lambda: fake)
+
+    with pytest.raises(SystemExit):
+        commands.show_context()
+    assert "scriptit session new" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("workspaces/ws/team/script", "/workspaces/ws/team/script"),
+        ("/workspaces/ws/team/script", "/workspaces/ws/team/script"),
+    ],
+)
+def test_fs_paths_are_canonicalized_before_transport(path: str, expected: str) -> None:
+    from scriptit_cli import commands
+
+    assert commands._canonical_fs_path(path) == expected
+
+
+def test_fs_push_sends_and_reports_the_canonical_remote_path(monkeypatch, capsys) -> None:
+    from scriptit_cli import commands
+
+    calls: list[tuple[str, str, str]] = []
+
+    class _FsClient:
+        @staticmethod
+        def ensure_sandbox() -> str:
+            return "sbx_1"
+
+        @staticmethod
+        def fs_upload(sandbox_id: str, remote: str, local: str) -> None:
+            calls.append((sandbox_id, remote, local))
+
+    monkeypatch.setattr(commands, "_client_or_exit", _FsClient)
+
+    commands.FsCommands().push("report.csv", "workspaces/ws/report.csv")
+
+    assert calls == [("sbx_1", "/workspaces/ws/report.csv", "report.csv")]
+    assert capsys.readouterr().out == ("Pushed report.csv -> /workspaces/ws/report.csv\n")
+
+
+def test_session_new_only_creates_the_session(monkeypatch, capsys) -> None:
+    from scriptit_cli import commands
+
+    class _SessionClient:
+        state_key = "test"
+
+        @staticmethod
+        def ensure_sandbox():
+            return "sbx_1"
+
+        @staticmethod
+        def create_session(sandbox_id):
+            assert sandbox_id == "sbx_1"
+            return "ses_42"
+
+        @staticmethod
+        def agent_context(*args, **kwargs):
+            raise AssertionError("session new must not fetch context")
+
+    monkeypatch.setattr(commands, "_client_or_exit", _SessionClient)
+    monkeypatch.setattr(commands, "update_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(commands.analytics, "track", lambda *args, **kwargs: None)
+
+    commands.SessionCommands().new()
+    assert capsys.readouterr().out == "Anchor session: ses_42 (sandbox sbx_1)\n"
+
+
+def test_the_client_owns_no_agent_behavior_prompt() -> None:
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "scriptit_cli" / "commands.py").read_text()
+    for marker in (
+        "sticky Script.it session",
+        "Professional objectivity",
+        "Link the active script",
+    ):
+        assert marker not in source
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +740,66 @@ def test_named_session_that_is_gone_is_an_error_not_a_replacement(
 
     with pytest.raises(remote.RemoteError, match="ses_missing"):
         client.ensure_session("sb")
+
+
+def test_existing_anchor_reapplies_and_persists_detected_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client.profile, client.api_url = "default", "http://x"
+    client.state_key = "default:http://x"
+    remote.update_state(
+        client.state_key,
+        session_id="ses_existing",
+        sandbox_id="sb",
+        client=None,
+    )
+    monkeypatch.setattr(remote, "detect_client", lambda: "codex")
+    monkeypatch.setattr(remote.RemoteClient, "session_exists", lambda *a: True)
+    calls = []
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return _Response()
+
+    client.request = request
+
+    assert client.ensure_session("sb") == "ses_existing"
+    assert calls[0][2]["json"] == {"add": ["cli", "client:codex"]}
+    assert remote.load_state(client.state_key)["client"] == "codex"
+
+
+def test_session_attribution_falls_back_to_the_client_bound_to_that_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client.profile, client.api_url = "default", "http://x"
+    client.state_key = "default:http://x"
+    remote.update_state(
+        client.state_key,
+        session_id="ses_existing",
+        sandbox_id="sb",
+        client="codex",
+    )
+    monkeypatch.setattr(remote, "detect_client", lambda: None)
+    seen = {}
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+    def request(method, path, **kwargs):
+        seen.update(kwargs)
+        return _Response()
+
+    client.request = request
+
+    assert client.ensure_session_attribution("sb", "ses_existing") == "codex"
+    assert seen["json"] == {"add": ["cli", "client:codex"]}
 
 
 # ---------------------------------------------------------------------------
@@ -1161,7 +1310,10 @@ def test_json_mode_is_not_claimed_for_a_command_that_streams(monkeypatch) -> Non
     from scriptit_cli.main import extract_json_flag
 
     assert extract_json_flag(["fs", "read", "--json", "/p"]) == (["fs", "read", "/p"], False)
-    assert extract_json_flag(["fs", "ls", "--json", "/p"]) == (["fs", "ls", "/p"], True)
+    assert extract_json_flag(["fs", "write", "--json", "/p", "text"]) == (
+        ["fs", "write", "/p", "text"],
+        True,
+    )
 
 
 def test_a_cached_version_of_the_wrong_type_never_breaks_a_command(tmp_path, monkeypatch) -> None:
@@ -1288,29 +1440,10 @@ def test_the_store_lock_serializes_concurrent_writers(tmp_path) -> None:
     assert final == {f"w{i}": 10 for i in range(4)}, f"lost updates: {final}"
 
 
-def test_the_bundle_tells_a_truncating_harness_to_read_it_all() -> None:
-    """The bundle runs to tens of thousands of characters and most agent hosts
-    cap inline output below that, spilling the rest to a file. The warning has
-    to come first, because position is what a truncating host preserves."""
-    import io
-    from contextlib import redirect_stdout
-
-    from scriptit_cli import agentcontext as ac
-
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        ac.render(ac.build(_FakeClient("https://app.example.test"), "sbx_1", "ses_42"))
-    out = buf.getvalue()
-    assert out.startswith("=== Script.it session context: read all of it")
-    assert "read to the end" in out[:600]
-
-
 def test_a_known_harness_needs_no_manual_declaration() -> None:
     """SCRIPTIT_CLIENT is the fallback, not the contract: hosts already export
     a marker, and asking an agent to set one it cannot know is a step that
     silently no-ops when skipped."""
-    import os
-
     for var, slug in client._CLIENT_ENV_MARKERS:
         env = {k: v for k, v in os.environ.items() if k not in dict(client._CLIENT_ENV_MARKERS)}
         env.pop("SCRIPTIT_CLIENT", None)
@@ -1325,34 +1458,46 @@ def test_a_known_harness_needs_no_manual_declaration() -> None:
             os.environ.update(old)
 
 
-def test_the_entry_point_skill_stays_a_bootstrap() -> None:
-    """The skill is a copy on the user's disk, updated only when they
-    re-download it; the bundle ships with the client and is printed live. So
-    anything said in both drifts, and the frozen copy is the one that goes
-    stale. The skill keeps how to start; the bundle keeps what is true.
+def test_the_entry_point_skill_documents_every_client_command() -> None:
+    """The bundled skill must explain the workstation command surface while
+    leaving account-specific and sandbox-runtime details to the live bundle.
     """
+    import inspect
     from pathlib import Path
 
-    from scriptit_cli import agentcontext as ac
+    from scriptit_cli.auth import AuthCommands
+    from scriptit_cli.commands import FsCommands, SandboxCommands, SessionCommands
+    from scriptit_cli.remote import RemoteClient
 
     root = Path(__file__).resolve().parent.parent
     skill = (root / "agent-skills/scriptit/SKILL.md").read_text().lower()
-    # The rendered bundle, not the templates: `?settings=integrations` only
-    # exists once the session URL is filled in.
-    built = ac.build(_FakeClient("https://app.example.test"), "sbx_1", "ses_42")
-    bundle = (built["notes"] + built["links"]).lower()
-    for topic in (
-        "data_files",
-        "sticky",
-        "one at a time",
-        "--timeout",
-        "fs ls",
-        "files_written",
-        "8kb",
-        "?settings=integrations",
-    ):
-        assert topic in bundle, f"the bundle should own {topic!r}"
-        assert topic not in skill, f"{topic!r} is duplicated in the skill"
+
+    groups = {
+        "auth": AuthCommands,
+        "fs": FsCommands,
+        "session": SessionCommands,
+        "sandbox": SandboxCommands,
+    }
+    client_commands = {"scriptit context", "scriptit exec", "scriptit version"}
+    for group, command_class in groups.items():
+        client_commands.update(
+            f"scriptit {group} {name.replace('_', '-')}"
+            for name, method in inspect.getmembers(command_class, inspect.isfunction)
+            if not name.startswith("_")
+        )
+
+    for command in client_commands:
+        assert command in skill, f"the skill should explain {command!r}"
+
+    assert "scriptit --help" in skill
+    assert "scriptit --version" in skill
+    assert not hasattr(FsCommands, "ls")
+    assert not hasattr(RemoteClient, "fs_list")
+    assert "fs ls" not in skill
+    assert "exec -- ls" in skill
+    assert "scriptit context" in skill
+    assert "link the active script" not in skill
+    assert "connect a missing integration" not in skill
 
 
 # ---------------------------------------------------------------------------
@@ -1387,10 +1532,7 @@ def _logged_in(monkeypatch, **overrides) -> None:
 
 
 def test_the_handoff_code_rides_in_the_fragment(monkeypatch, capsys) -> None:
-    """Never the query string. A fragment is not sent to any server, so the
-    code stays out of access logs and out of any Referer the next page sends —
-    which is the only reason it is safe to put a live credential in a URL an
-    agent will paste around."""
+    """Never the query string, where it would enter logs and Referer headers."""
     from scriptit_cli.auth import AuthCommands
 
     _logged_in(monkeypatch)
@@ -1405,9 +1547,6 @@ def test_the_handoff_code_rides_in_the_fragment(monkeypatch, capsys) -> None:
 
 
 def test_the_handoff_reports_the_harness_that_asked(monkeypatch) -> None:
-    """Attribution only — the backend records it and renders it as reported,
-    never as verified, because anything self-reported is chosen by whoever is
-    calling."""
     from scriptit_cli.auth import AuthCommands
 
     _logged_in(monkeypatch)
@@ -1426,9 +1565,6 @@ def test_the_handoff_reports_the_harness_that_asked(monkeypatch) -> None:
 
 
 def test_a_deployment_that_cannot_do_handoff_says_so_verbatim(monkeypatch, capsys) -> None:
-    """Keycloak deployments answer 409 because the handoff is unimplementable
-    there, not merely unimplemented. The backend's wording is the useful part,
-    so it is passed through rather than replaced with a guess."""
     from scriptit_cli.auth import AuthCommands
 
     _logged_in(monkeypatch)
@@ -1445,7 +1581,6 @@ def test_a_deployment_that_cannot_do_handoff_says_so_verbatim(monkeypatch, capsy
 
 
 def test_a_non_json_handoff_error_still_reports_cleanly(monkeypatch, capsys) -> None:
-    """A proxy answering HTML must read as a failed command, not a traceback."""
     from scriptit_cli.auth import AuthCommands
 
     _logged_in(monkeypatch)
@@ -1460,8 +1595,6 @@ def test_a_non_json_handoff_error_still_reports_cleanly(monkeypatch, capsys) -> 
 
 
 def test_the_handoff_url_is_the_only_thing_on_stdout(monkeypatch, capsys) -> None:
-    """The warning about what the URL is worth goes to stderr, so `$(...)`
-    around this command captures a usable URL and nothing else."""
     from scriptit_cli.auth import AuthCommands
 
     _logged_in(monkeypatch)
@@ -1476,8 +1609,6 @@ def test_the_handoff_url_is_the_only_thing_on_stdout(monkeypatch, capsys) -> Non
 
 
 def test_a_login_with_no_recorded_app_origin_is_refused(monkeypatch, capsys) -> None:
-    """Building the URL against a guessed host would send the code to whatever
-    that host turned out to be."""
     from scriptit_cli.auth import AuthCommands
 
     _logged_in(monkeypatch, app_url="")
@@ -1496,10 +1627,6 @@ def test_handoff_requires_a_login(capsys) -> None:
 
 
 def test_login_does_not_pop_a_window_when_an_agent_is_driving(monkeypatch) -> None:
-    """A harness has its own browser and cannot see the one webbrowser.open
-    launches — so opening it puts the login page in front of the human while
-    the agent, which is the caller, learns nothing. The URL is printed instead
-    and whoever is driving decides."""
     from scriptit_cli.auth import _should_open_browser
 
     for var, _slug in client._CLIENT_ENV_MARKERS:

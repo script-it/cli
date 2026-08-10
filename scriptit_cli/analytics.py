@@ -64,6 +64,7 @@ _KNOWN_TOKENS = frozenset(
     {
         # this client's own commands and their subcommands
         "auth",
+        "context",
         "current",
         "exec",
         "fs",

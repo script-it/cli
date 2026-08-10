@@ -43,6 +43,7 @@ ENV_SESSION = "SCRIPTIT_SESSION"
 # sandbox and answered by the CLI running there.
 CLIENT_COMMANDS = {
     "auth",
+    "context",
     "fs",
     "session",
     "sandbox",
@@ -433,11 +434,54 @@ class RemoteClient:
     def _proxy(self, sandbox_id: str, path: str) -> str:
         return f"/api/v1/sandbox/{sandbox_id}/proxy/{path}"
 
+    def agent_context(self, sandbox_id: str, context_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the complete sandbox-assembled external-agent context."""
+        resp = self.request(
+            "POST",
+            self._proxy(sandbox_id, "agent-context"),
+            json=context_data,
+            wake_on_503=False,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RemoteError(f"agent context unavailable ({resp.status_code}): {resp.text[:300]}")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise RemoteError("agent context returned invalid JSON") from exc
+        if not isinstance(body, dict) or body.get("schema_version") != 1:
+            raise RemoteError("agent context returned an unsupported schema")
+        if not isinstance(body.get("markdown"), str) or not body["markdown"].strip():
+            raise RemoteError("agent context omitted its rendered instructions")
+        return body
+
     def session_exists(self, sandbox_id: str, session_id: str) -> bool:
         resp = self.request(
             "GET", self._proxy(sandbox_id, f"session/{session_id}/exists"), timeout=30
         )
         return resp.status_code == 200 and bool(resp.json().get("exists"))
+
+    def ensure_session_attribution(
+        self,
+        sandbox_id: str,
+        session_id: str,
+        client_tag: str = "cli",
+    ) -> Optional[str]:
+        """Idempotently attribute a bound session to this CLI and harness."""
+        detected = detect_client()
+        state = load_state(self.state_key)
+        persisted = state.get("client") if state.get("session_id") == session_id else None
+        client = detected or (persisted if isinstance(persisted, str) and persisted else None)
+        tags = [client_tag] + ([f"client:{client}"] if client else [])
+        resp = self.request(
+            "POST",
+            self._proxy(sandbox_id, f"session/{session_id}/tags"),
+            json={"add": tags},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RemoteError(f"session attribution failed ({resp.status_code}): {resp.text[:300]}")
+        return client
 
     def create_session(self, sandbox_id: str, client_tag: str = "cli") -> str:
         # ACP initialize is idempotent; retry through agent-boot races (425).
@@ -467,25 +511,17 @@ class RemoteClient:
         else:
             raise RemoteError("session/new failed")
 
-        # Label the session so the Script.it app can distinguish remote-agent
-        # activity — and WHICH harness drives it, when known. Best-effort —
-        # a tagging failure never blocks login/exec.
-        client = detect_client()
-        tags = [client_tag] + ([f"client:{client}"] if client else [])
+        # Attribute the session before returning it so the app never silently
+        # loses which external harness is driving. The display title remains
+        # cosmetic and may fail without invalidating the usable session.
+        client = self.ensure_session_attribution(sandbox_id, str(session_id), client_tag)
         title = f"CLI remote session ({client})" if client else "CLI remote session"
-        try:
+        with contextlib.suppress(ScriptItError, requests.RequestException):
             # RemoteError too: `request` wraps transport failures in it, so
             # catching only RequestException would let a cosmetic call fail
             # session creation after the session already exists. wake_on_503
             # off for the same reason — this must not spend three minutes
             # retrying a title.
-            self.request(
-                "POST",
-                self._proxy(sandbox_id, f"session/{session_id}/tags"),
-                json={"add": tags},
-                wake_on_503=False,
-                timeout=30,
-            )
             self.request(
                 "PATCH",
                 self._proxy(sandbox_id, f"session/{session_id}"),
@@ -493,8 +529,6 @@ class RemoteClient:
                 wake_on_503=False,
                 timeout=30,
             )
-        except (ScriptItError, requests.RequestException):
-            pass
         return str(session_id)
 
     def anchor(self) -> Tuple[Optional[str], Optional[str], str]:
@@ -517,6 +551,9 @@ class RemoteClient:
     def ensure_session(self, sandbox_id: str) -> str:
         session_id, _, source = self.anchor()
         if session_id and self.session_exists(sandbox_id, str(session_id)):
+            client = self.ensure_session_attribution(sandbox_id, str(session_id))
+            if source == "state" and client:
+                update_state(self.state_key, client=client)
             return str(session_id)
         if source == "env":
             # An explicitly named session that does not exist is a mistake
@@ -525,7 +562,12 @@ class RemoteClient:
                 f"session {session_id} (from {ENV_SESSION}) not found in sandbox {sandbox_id}"
             )
         session_id = self.create_session(sandbox_id)
-        update_state(self.state_key, sandbox_id=sandbox_id, session_id=session_id)
+        update_state(
+            self.state_key,
+            sandbox_id=sandbox_id,
+            session_id=session_id,
+            client=detect_client(),
+        )
         return session_id
 
     # -- shell over session/shell + SSE ------------------------------------
@@ -837,15 +879,6 @@ class RemoteClient:
         return output, exit_code
 
     # -- files -------------------------------------------------------------
-
-    def fs_list(self, sandbox_id: str, path: str) -> Dict[str, Any]:
-        """List a sandbox directory via the backend file routes."""
-        resp = self.request(
-            "GET", f"/api/v1/file/{sandbox_id}/list", params={"path": path}, timeout=60
-        )
-        if resp.status_code != 200:
-            raise RemoteError(f"list failed ({resp.status_code}): {resp.text[:300]}")
-        return resp.json()
 
     def fs_read(self, sandbox_id: str, path: str) -> bytes:
         """Read a sandbox file's bytes (base64 over the wire, decoded here)."""
