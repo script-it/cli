@@ -19,6 +19,7 @@ from scriptit_cli.errors import ScriptItError
 from scriptit_cli.output import emit, fail
 from scriptit_cli.remote import ENV_SESSION, RemoteClient, update_state
 
+
 def _session_urls(client: RemoteClient, session_id: Optional[str]) -> Dict[str, Optional[str]]:
     session_url = f"{client.app_url}/app/s/{session_id}" if client.app_url and session_id else None
     return {"session_url": session_url}
