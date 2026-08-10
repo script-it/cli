@@ -4,7 +4,7 @@
 
 Please report security issues privately rather than opening a public issue.
 GitHub's
-[**Report a vulnerability**](https://github.com/bespo-ai/script.it-cli/security/advisories/new)
+[**Report a vulnerability**](https://github.com/script-it/cli/security/advisories/new)
 form opens an advisory that only you and the maintainers can see.
 
 Include what you found, how to reproduce it, and what an attacker could do with

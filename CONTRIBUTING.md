@@ -5,8 +5,8 @@ Thanks for helping. Issues and pull requests are both welcome.
 ## Setup
 
 ```bash
-git clone https://github.com/bespo-ai/script.it-cli.git
-cd script.it-cli
+git clone https://github.com/script-it/cli.git
+cd cli
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
