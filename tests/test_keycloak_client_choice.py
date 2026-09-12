@@ -32,7 +32,9 @@ def test_prefers_the_realm_cli_client_the_backend_names(monkeypatch) -> None:
     """A session issued to the CLI's own client is what the backend treats as
     an outside agent, so the account can govern it; signing in through the
     web client would leave the session indistinguishable from a browser's."""
-    assert _client_used_for(monkeypatch, {**_BASE, "cli_client_id": "scriptit-cli"}) == "scriptit-cli"
+    assert (
+        _client_used_for(monkeypatch, {**_BASE, "cli_client_id": "scriptit-cli"}) == "scriptit-cli"
+    )
 
 
 def test_falls_back_to_the_web_client_for_a_backend_that_predates_the_field(monkeypatch) -> None:
