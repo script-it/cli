@@ -358,11 +358,16 @@ class AuthCommands:
         keycloak = config.get("keycloak") or {}
         if not (keycloak.get("url") and keycloak.get("realm") and keycloak.get("client_id")):
             fail("the API did not advertise Keycloak realm details")
+        # The realm's own CLI client when the backend names one: a session
+        # issued to it is what the backend treats as an outside agent, so the
+        # account can govern it. A backend that predates the field advertises
+        # only the web client, which is then the only way in.
+        client_id = str(keycloak.get("cli_client_id") or keycloak["client_id"])
         try:
             creds = keycloak_device_login(
                 str(keycloak["url"]),
                 str(keycloak["realm"]),
-                str(keycloak["client_id"]),
+                client_id,
                 timeout=timeout,
             )
         except RemoteAuthError as exc:
