@@ -155,22 +155,33 @@ def test_pkce_pair_is_rfc7636_s256() -> None:
 def test_interrupt_reports_cleanly_not_as_a_traceback(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """An agent harness enforcing a per-command timeout SIGINTs the CLI
-    mid-dispatch; that must exit 130 with one line, not a stack trace."""
+    """Ctrl-C returns 130 promptly even when the SSE socket is still reading."""
+    cleanup = threading.Event()
+
+    def lines():
+        yield from _sse("session_snapshot", {"rows": []}, "1")
+        cleanup.wait(5)
+
+    response = _EventResponse(lines)
+    response.close = lambda: cleanup.wait(5)
+    client = _client_for_stream_test(monkeypatch, lambda *a, **k: response)
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    client.request = interrupt
     monkeypatch.setattr(remote, "load_credentials", lambda: {"api_url": "http://x"})
-    monkeypatch.setattr(remote, "RemoteClient", lambda *a, **k: _InterruptingClient())
-
-    code = remote.remote_dispatch_if_applicable(["status", "run-1"])
-
+    monkeypatch.setattr(remote, "RemoteClient", lambda *a, **k: client)
+    start = time.monotonic()
+    try:
+        code = remote.remote_dispatch_if_applicable(["status", "run-1"])
+    finally:
+        cleanup.set()
+    assert time.monotonic() - start < 1
     assert code == remote.INTERRUPTED_EXIT_CODE == 130
     err = capsys.readouterr().err
     assert "interrupted" in err and "still be running" in err
     assert "Traceback" not in err
-
-
-class _InterruptingClient:
-    def shell(self, _command: str):
-        raise KeyboardInterrupt
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +193,7 @@ def test_iter_sse_events_frames_and_multiline_data() -> None:
     stream = [
         b": keepalive",
         b"",
+        b"id: 42",
         b"event: session_update",
         b'data: {"a":',
         b"data: 1}",
@@ -193,7 +205,8 @@ def test_iter_sse_events_frames_and_multiline_data() -> None:
     events = list(remote._iter_sse_events(iter(stream)))
     assert events[0][0] == "session_update"
     assert json.loads(events[0][1]) == {"a": 1}
-    assert events[1] == ("message_complete", "{}")
+    assert events[0][2] == "42"
+    assert events[1] == ("message_complete", "{}", None)
 
 
 # ---------------------------------------------------------------------------
@@ -514,28 +527,39 @@ def test_fs_push_sends_and_reports_the_canonical_remote_path(monkeypatch, capsys
 def test_session_new_only_creates_the_session(monkeypatch, capsys) -> None:
     from scriptit_cli import commands
 
-    class _SessionClient:
+    calls = []
+
+    class _SessionClient(remote.RemoteClient):
         state_key = "test"
+
+        def __init__(self):
+            pass
 
         @staticmethod
         def ensure_sandbox():
             return "sbx_1"
 
         @staticmethod
-        def create_session(sandbox_id):
-            assert sandbox_id == "sbx_1"
-            return "ses_42"
+        def request(method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return _json_response({"sessionId": "ses_42"})
 
         @staticmethod
         def agent_context(*args, **kwargs):
             raise AssertionError("session new must not fetch context")
 
     monkeypatch.setattr(commands, "_client_or_exit", _SessionClient)
+    monkeypatch.setattr(remote, "detect_client", lambda: None)
     monkeypatch.setattr(commands, "update_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(commands.analytics, "track", lambda *args, **kwargs: None)
 
     commands.SessionCommands().new()
     assert capsys.readouterr().out == "Anchor session: ses_42 (sandbox sbx_1)\n"
+    assert calls[1] == (
+        "POST",
+        "/api/v1/sandbox/sbx_1/proxy/session/new",
+        {"json": {"cwd": "/workspaces", "mcpServers": []}, "timeout": 60},
+    )
 
 
 def test_the_client_owns_no_agent_behavior_prompt() -> None:
@@ -943,6 +967,9 @@ def test_stream_failure_before_bootstrap_blocks_the_dispatch(
         def __exit__(self, *a):
             return False
 
+        def close(self):
+            pass
+
     client = _client_for_stream_test(monkeypatch, lambda *a, **k: _Ctx())
     with pytest.raises(remote.RemoteError, match="events stream"):
         client.shell("echo hi")
@@ -965,6 +992,9 @@ def test_stream_failure_after_bootstrap_ends_collection_promptly(
 
         def __exit__(self, *a):
             return False
+
+        def close(self):
+            pass
 
         @staticmethod
         def iter_lines(decode_unicode=False):
@@ -1010,10 +1040,40 @@ def test_logout_all_empties_under_the_lock_and_reports_truthfully() -> None:
     assert remote_auth.delete_credentials(all_profiles=True) is False
 
 
-def _sse(event: str, payload: dict):
+def _sse(event: str, payload: dict, event_id=None):
+    if event_id is not None:
+        yield f"id: {event_id}".encode()
     yield f"event: {event}".encode()
     yield f"data: {json.dumps(payload)}".encode()
     yield b""
+
+
+def _json_response(body, status=200):
+    response = remote.requests.Response()
+    response.status_code = status
+    response._content = json.dumps(body).encode()
+    response._content_consumed = True
+    return response
+
+
+class _EventResponse:
+    status_code = 200
+
+    def __init__(self, lines):
+        self.lines = lines
+        self.closed = threading.Event()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        self.closed.set()
+
+    def iter_lines(self, **kwargs):
+        yield from self.lines()
 
 
 def test_shell_collects_output_and_the_exit_code_end_to_end(
@@ -1040,6 +1100,9 @@ def test_shell_collects_output_and_the_exit_code_end_to_end(
 
         def __exit__(self, *a):
             return False
+
+        def close(self):
+            pass
 
         @staticmethod
         def iter_lines(decode_unicode=False):
@@ -1075,6 +1138,338 @@ def test_shell_collects_output_and_the_exit_code_end_to_end(
     assert "base64 -d | bash" in sent["command"]
 
 
+@pytest.mark.parametrize("recovery", ["early", "replay", "snapshot"])
+def test_native_shell_pages_full_output_and_recovers_its_own_result(
+    monkeypatch,
+    capsys,
+    recovery,
+):
+    """UTF-8 byte cursors, early completion, replay, and row recovery all
+    collect exactly one invocation's full output, including the excerpt gap."""
+    sent = {}
+    headers = []
+    cursors = []
+    submitted = threading.Event()
+    paged = threading.Event()
+    ended = threading.Event()
+    output = "λ漢🧪" * 20000 + "\nlast line"
+    encoded = output.encode()
+    command = "printf '%s' \"$HOME\"; echo `date`\nexit 9"
+
+    def info(status="running"):
+        return {
+            "id": "sh_ours",
+            "status": status,
+            "exit": 9,
+            "metadata": {"messageID": sent["message_id"], "sessionID": "ses"},
+        }
+
+    preview = {
+        "output": "head [... omitted ...] tail",
+        "cursor": len(encoded),
+        "size": len(encoded),
+        "truncated": True,
+    }
+
+    def lines():
+        if len(headers) == 1:
+            yield from _sse("session_snapshot", {"rows": [], "mode": "replace"}, "10")
+            assert submitted.wait(5)
+            unrelated = {**info(), "id": "sh_someone_else", "metadata": {"messageID": "msg_other"}}
+            yield from _sse(
+                "session_event",
+                {
+                    "type": "session.shell.ended",
+                    "data": {"shell": unrelated, "output": preview},
+                },
+                "11",
+            )
+            yield from _sse(
+                "session_event",
+                {
+                    "type": "session.shell.started",
+                    "data": {"shell": info()},
+                },
+                "12",
+            )
+            if recovery != "early":
+                assert paged.wait(5)
+                raise remote.requests.ConnectionError("connection lost after output")
+        if recovery == "snapshot":
+            yield from _sse(
+                "session_snapshot",
+                {
+                    "mode": "replace",
+                    "rows": [
+                        {
+                            "id": sent["message_id"],
+                            "type": "shell",
+                            "shellID": "sh_ours",
+                            "status": "exited",
+                            "exit": 9,
+                            "output": preview,
+                        }
+                    ],
+                },
+                "13",
+            )
+        else:
+            yield from _sse(
+                "session_event",
+                {
+                    "type": "session.shell.ended",
+                    "data": {"shell": info("exited"), "output": preview},
+                },
+                "13",
+            )
+        # A delayed merge of the running row cannot erase its terminal event.
+        yield from _sse(
+            "session_snapshot",
+            {
+                "mode": "merge",
+                "rows": [
+                    {
+                        "id": sent["message_id"],
+                        "type": "shell",
+                        "shellID": "sh_ours",
+                        "status": "running",
+                    }
+                ],
+            },
+        )
+        ended.set()
+
+    def get_response(*args, **kwargs):
+        headers.append(kwargs["headers"])
+        return _EventResponse(lines)
+
+    def request(self, method, path, **kwargs):
+        assert kwargs["wake_on_503"] is False
+        if method == "POST":
+            assert not sent, "a reconnect must never submit another command"
+            sent.update(kwargs["json"])
+            submitted.set()
+            if recovery == "early":
+                assert ended.wait(5), "completion must be retained before the POST response"
+            return _json_response({"message_id": sent["message_id"], "shell": info()}, 202)
+        assert path.endswith("/shell/sh_ours/output")
+        cursor = kwargs["params"]["cursor"]
+        cursors.append(cursor)
+        if recovery == "replay" and len(cursors) == 1:
+            raise remote.RemoteError("output connection reset")
+        if recovery == "replay" and len(cursors) == 2:
+            return _json_response({}, 503)
+        end = min(cursor + kwargs["params"]["limit"], len(encoded))
+        while True:
+            try:
+                chunk = encoded[cursor:end].decode()
+                break
+            except UnicodeDecodeError:
+                end -= 1
+        paged.set()
+        return _json_response(
+            {"output": chunk, "cursor": end, "size": len(encoded), "truncated": False}
+        )
+
+    monkeypatch.setattr(remote.RemoteClient, "request", request)
+    client = _client_for_stream_test(monkeypatch, get_response)
+    result, code = client.shell(
+        command, cwd="/workspaces/my project", command_timeout_s=0.5, timeout_s=5, echo=True
+    )
+    assert result == output and code == 9
+    assert capsys.readouterr().out == output
+    import shlex
+
+    assert shlex.split(sent["command"]) == [
+        "timeout",
+        "0.5",
+        "bash",
+        "-c",
+        remote.apply_cwd(command, "/workspaces/my project"),
+    ]
+    assert cursors[0] == 0 and min(cursor for cursor in cursors if cursor) > 60000
+    assert cursors == sorted(cursors)
+    assert len(set(cursors)) >= 3  # pages are byte-sized, not character-sized
+    assert all(
+        header["x-scriptit-events-group"] == headers[0]["x-scriptit-events-group"]
+        for header in headers
+    )
+    assert headers[0]["x-scriptit-events-group"].startswith("cli-")
+    assert headers[0]["x-scriptit-events-group"] != remote._SessionEvents(client, "sb", "ses").group
+    if recovery != "early":
+        assert len(headers) == 2
+        assert headers[1]["Last-Event-ID"] == "12"
+
+
+@pytest.mark.parametrize(
+    "first_response,posts",
+    [
+        ((409, {"detail": {"code": "SESSION_BUSY", "retry_after_ms": 25}}), 2),
+        ((503, {"detail": {"code": "SHELL_NOT_SUBMITTED", "retry_after_ms": 50}}), 2),
+        (
+            (
+                503,
+                {
+                    "detail": {
+                        "code": "SANDBOX_RESUMING",
+                        "submission_state": "not_submitted",
+                        "retry_after_ms": 75,
+                    }
+                },
+            ),
+            2,
+        ),
+        ((503, {"detail": {"code": "SHELL_SUBMISSION_UNKNOWN"}}), 1),
+        ((503, {"error": "upstream disconnected"}), 1),
+        (None, 1),
+    ],
+)
+def test_native_submission_retries_only_explicit_refusals(monkeypatch, first_response, posts):
+    sent = []
+    submitted = threading.Event()
+    delays = []
+    preview = {"output": "ok", "cursor": 2, "size": 2, "truncated": False}
+
+    def lines():
+        yield from _sse("session_snapshot", {"rows": []}, "1")
+        assert submitted.wait(5)
+        yield from _sse(
+            "session_event",
+            {
+                "type": "session.shell.ended",
+                "data": {
+                    "shell": {
+                        "id": "sh_ours",
+                        "status": "exited",
+                        "exit": 0,
+                        "metadata": {"messageID": sent[-1]["message_id"]},
+                    },
+                    "output": preview,
+                },
+            },
+            "2",
+        )
+
+    def request(self, method, path, **kwargs):
+        assert kwargs["wake_on_503"] is False
+        if method == "GET":
+            return _json_response(
+                {**preview, "output": "ok" if kwargs["params"]["cursor"] == 0 else ""}
+            )
+        sent.append(kwargs["json"])
+        if len(sent) == posts:
+            submitted.set()
+        if len(sent) == 1:
+            if first_response is None:
+                raise remote.RemoteError("API request failed: connection reset")
+            status, body = first_response
+            return _json_response(body, status)
+        return _json_response(
+            {"message_id": sent[-1]["message_id"], "shell": {"id": "sh_ours"}}, 202
+        )
+
+    monkeypatch.setattr(remote.RemoteClient, "request", request)
+    monkeypatch.setattr(remote.time, "sleep", delays.append)
+    client = _client_for_stream_test(monkeypatch, lambda *a, **k: _EventResponse(lines))
+    assert client.shell("echo ok", timeout_s=2, echo=False) == ("ok", 0)
+    assert len(sent) == posts
+    assert len({row["message_id"] for row in sent}) == 1
+    if posts == 2:
+        assert delays == [first_response[1]["detail"]["retry_after_ms"] / 1000]
+        assert sent[0]["command"] == "echo ok"
+    else:
+        assert delays == []
+
+
+@pytest.mark.parametrize(
+    "status,exit_code,page_mode,expected",
+    [
+        ("exited", 7, "saved", 7),
+        ("exited", None, "page", None),
+        ("unavailable", 0, "page", None),
+        ("timeout", None, "page", 124),
+        ("killed", None, "page", 130),
+        (None, 0, "page", None),
+        ("exited", 0, "truncated_saved", "complete shell output"),
+        ("exited", 0, "missing_page", "incomplete page"),
+        ("exited", 0, "stalled", "recorded size"),
+    ],
+)
+def test_native_shell_requires_complete_output_and_a_real_status(
+    monkeypatch,
+    status,
+    exit_code,
+    page_mode,
+    expected,
+):
+    sent = {}
+    submitted = threading.Event()
+    preview = {"output": "ok", "cursor": 2, "size": 2, "truncated": page_mode == "truncated_saved"}
+
+    def lines():
+        yield from _sse("session_snapshot", {"rows": []}, "1")
+        assert submitted.wait(5)
+        yield from _sse(
+            "session_snapshot",
+            {
+                "rows": [
+                    {
+                        "id": sent["message_id"],
+                        "type": "shell",
+                        "shellID": "sh_ours",
+                        "status": status,
+                        "exit": exit_code,
+                        "output": preview,
+                    }
+                ]
+            },
+            "2",
+        )
+
+    def request(self, method, path, **kwargs):
+        if method == "POST":
+            sent.update(kwargs["json"])
+            submitted.set()
+            return _json_response(
+                {"message_id": sent["message_id"], "shell": {"id": "sh_ours"}}, 202
+            )
+        if page_mode in ("saved", "truncated_saved"):
+            return _json_response({}, 404)
+        if page_mode == "missing_page":
+            return _json_response({"cursor": 0, "size": 0, "truncated": False})
+        if page_mode == "stalled":
+            return _json_response({"output": "", "cursor": 0, "size": 2, "truncated": False})
+        return _json_response(
+            {**preview, "output": "ok" if kwargs["params"]["cursor"] == 0 else ""}
+        )
+
+    monkeypatch.setattr(remote.RemoteClient, "request", request)
+    client = _client_for_stream_test(monkeypatch, lambda *a, **k: _EventResponse(lines))
+    if isinstance(expected, str):
+        with pytest.raises(remote.RemoteError, match=expected):
+            client.shell("echo ok", timeout_s=2, echo=False)
+    else:
+        assert client.shell("echo ok", timeout_s=2, echo=False) == ("ok", expected)
+
+
+@pytest.mark.parametrize("method,attempts", [("GET", 2), ("POST", 1)])
+def test_request_never_retries_a_mutation_on_a_bare_503(monkeypatch, method, attempts):
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client.api_url = "http://x"
+    responses = []
+
+    def request(*args, **kwargs):
+        responses.append(_json_response({}, 503 if not responses else 200))
+        return responses[-1]
+
+    client._http = type("S", (), {"request": staticmethod(request)})()
+    monkeypatch.setattr(remote.RemoteClient, "_headers", lambda self: {})
+    monkeypatch.setattr(remote.RemoteClient, "post_activity", lambda self: None)
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: None)
+    assert client.request(method, "/operation").status_code == (200 if method == "GET" else 503)
+    assert len(responses) == attempts
+
+
 def _sentinel_of(dispatched: str) -> str:
     """Recover the per-call sentinel from the dispatched payload."""
     import base64 as b64
@@ -1098,7 +1493,7 @@ def test_a_stream_dying_before_a_redispatch_cancels_it(
     may_die = threading.Event()
     baseline = threading.active_count()
 
-    busy = type("R", (), {"status_code": 409, "text": "busy", "close": lambda self: None})()
+    busy = _json_response({"code": "SESSION_BUSY"}, 409)
     monkeypatch.setattr(
         remote.RemoteClient,
         "request",
@@ -1127,6 +1522,9 @@ def test_a_stream_dying_before_a_redispatch_cancels_it(
 
         def __exit__(self, *a):
             return False
+
+        def close(self):
+            pass
 
         @staticmethod
         def iter_lines(decode_unicode=False):
@@ -1353,6 +1751,9 @@ def test_a_stream_that_just_ends_is_a_failure_not_a_wait(
 
         def __exit__(self, *a):
             return False
+
+        def close(self):
+            pass
 
         @staticmethod
         def iter_lines(decode_unicode=False):

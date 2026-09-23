@@ -1,9 +1,10 @@
 """Remote transport for the workstation CLI.
 
 ``scriptit`` is a thin remote shell: verbs are forwarded verbatim into the
-user's sandbox (the platform's session-shell API) and the output is
-collected from the session's SSE event stream. The in-sandbox CLI stays the
-single behavior surface — this client never executes automation locally, so
+user's sandbox (the platform's session-shell API). Native output comes from
+byte-cursor pages and completion from SSE; v1 uses SSE plus file recovery.
+The in-sandbox CLI stays the single behavior surface — this client never
+executes automation locally, so
 every verb outside :data:`CLIENT_COMMANDS` is forwarded unconditionally.
 """
 
@@ -64,11 +65,6 @@ CLIENT_COMMANDS = {
 # How long to wait out a 409 SESSION_BUSY before re-attempting dispatch.
 _BUSY_RETRY_SECONDS = 3
 
-# Stream lifecycle for `shell()`; see the state machine there.
-_STREAM_BOOTSTRAPPING = 0
-_STREAM_LIVE = 1
-_STREAM_DISPATCHED = 2
-
 
 def make_message_id() -> str:
     """Message id, in the shape the session service expects: low 48 bits of
@@ -86,10 +82,7 @@ def make_message_id() -> str:
 def apply_cwd(command: str, cwd: Optional[str]) -> str:
     """Run ``command`` from ``cwd``, failing rather than running elsewhere.
 
-    The ``cd`` goes into the command itself, so it lands inside the subshell
-    :func:`build_shell_wrapper` builds and the tee still resolves relative to
-    the session directory. Note this makes the command multi-line, which is
-    what routes it down the exact-exit-code branch.
+    The guarded ``cd`` is part of the remote command, not a client-side path.
     """
     if not cwd:
         return command
@@ -253,32 +246,151 @@ def update_state(state_key: str, **fields: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _iter_sse_events(lines: Iterable[bytes]) -> Iterable[Tuple[str, str]]:
-    """Yield ``(event_name, data)`` pairs from an SSE byte-line stream.
+def _iter_sse_events(lines: Iterable[bytes]) -> Iterable[Tuple[str, str, Optional[str]]]:
+    """Yield ``(event_name, data, id)`` frames from an SSE byte-line stream.
 
     Handles multi-line ``data:`` fields and ignores comments/keepalives.
     ``event_name`` is ``"message"`` when the stream doesn't name events.
     """
     event_name = "message"
     data_lines: List[str] = []
+    event_id = None
     for raw in lines:
         line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
         if line == "":
             if data_lines:
-                yield event_name, "\n".join(data_lines)
+                yield event_name, "\n".join(data_lines), event_id
             event_name = "message"
             data_lines = []
+            event_id = None
             continue
         if line.startswith(":"):
             continue
         if line.startswith("event:"):
             event_name = line[len("event:") :].strip()
+        elif line.startswith("id:"):
+            event_id = line[len("id:") :].strip()
         elif line.startswith("data:"):
             # SSE spec: strip at most ONE leading space after the colon.
             val = line[len("data:") :]
             data_lines.append(val[1:] if val.startswith(" ") else val)
     if data_lines:
-        yield event_name, "\n".join(data_lines)
+        yield event_name, "\n".join(data_lines), event_id
+
+
+class _SessionEvents:
+    """One invocation's event listener; v2 reconnects resume its durable cursor."""
+
+    def __init__(self, client: RemoteClient, sandbox_id: str, session_id: str) -> None:
+        self.client = client
+        self.sandbox_id, self.session_id = sandbox_id, session_id
+        self.message_id = make_message_id()
+        self.url = f"{client.api_url}{client._proxy(sandbox_id, f'session/{session_id}/events')}"
+        self.group = f"cli-{secrets.token_hex(12)}"
+        self.protocol: Optional[int] = None
+        self.frames: queue.Queue = queue.Queue()
+        self.ready = threading.Event()
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.armed = False
+        self.error: Optional[str] = None
+        self.response: Optional[requests.Response] = None
+
+    def __enter__(self) -> _SessionEvents:
+        threading.Thread(target=self._read, daemon=True).start()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.stop.set()
+        response = self.response
+        if response is not None:
+            # requests.close can wait for the reader's socket lock. Cleanup
+            # must not delay a completed command or Ctrl-C until a heartbeat.
+            threading.Thread(target=response.close, daemon=True).start()
+
+    def arm(self) -> None:
+        # V1 has no resumable result stream. Check its liveness and start
+        # collecting in one critical section before issuing the POST.
+        with self.lock:
+            if self.error:
+                raise RemoteError(self.error)
+            self.armed = True
+
+    def disarm(self) -> None:
+        with self.lock:
+            self.armed = False
+            while not self.frames.empty():
+                self.frames.get_nowait()
+
+    def poll(self, timeout: float = 0.1) -> Optional[Tuple[str, Dict[str, Any]]]:
+        try:
+            name, payload = self.frames.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if name == "_stream_error":
+            raise RemoteError(payload["message"])
+        return name, payload
+
+    def _fail(self, message: str) -> None:
+        with self.lock:
+            self.error = message
+            self.frames.put(("_stream_error", {"message": message}))
+        self.ready.set()
+
+    def _read(self) -> None:
+        last_id = None
+        while not self.stop.is_set():
+            try:
+                headers = {**self.client._headers(), "x-scriptit-events-group": self.group}
+                if last_id is not None:
+                    headers["Last-Event-ID"] = last_id
+                with self.client._http.get(
+                    self.url, headers=headers, stream=True, timeout=(15, 60)
+                ) as resp:
+                    self.response = resp
+                    if resp.status_code != 200:
+                        message = f"events stream failed ({resp.status_code})"
+                        if resp.status_code < 500:
+                            self._fail(message)
+                            return
+                        raise requests.RequestException(message)
+                    for name, data, event_id in _iter_sse_events(
+                        resp.iter_lines(decode_unicode=False)
+                    ):
+                        if self.stop.is_set():
+                            return
+                        try:
+                            payload = json.loads(data)
+                        except ValueError:
+                            continue
+                        if not isinstance(payload, dict):
+                            continue
+                        if self.protocol is None and name in ("load_complete", "session_snapshot"):
+                            self.protocol = 1 if name == "load_complete" else 2
+                            self.ready.set()
+                        if name == "error" and (self.protocol == 2 or self.protocol is None):
+                            message = str(payload.get("message") or "session event stream failed")
+                            if self.protocol == 2 and payload.get("retryable") is True:
+                                raise requests.RequestException(message)
+                            self._fail(message)
+                            return
+                        with self.lock:
+                            if self.armed:
+                                self.frames.put((name, payload))
+                        if event_id is not None:
+                            last_id = event_id
+                message = "events stream closed before the command reported back"
+            except requests.RequestException as exc:
+                message = f"events stream dropped: {exc}"
+            except Exception as exc:
+                self._fail(f"events stream unexpected error: {exc!r}")
+                return
+            finally:
+                self.response = None
+            if self.protocol != 2:
+                self._fail(message)
+                return
+            self.stop.wait(1)
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +440,10 @@ class RemoteClient:
         timeout: float = 60.0,
         **kwargs: Any,
     ) -> requests.Response:
-        """One API call, transparently riding out sandbox resume/busy 503s."""
+        """One API call; only reads automatically retry sandbox resume 503s."""
         url = f"{self.api_url}{path}"
-        deadline = time.time() + 180 if wake_on_503 else time.time()
+        retry = wake_on_503 and method.upper() in ("GET", "HEAD")
+        deadline = time.time() + 180 if retry else time.time()
         while True:
             try:
                 resp = self._http.request(
@@ -484,7 +597,7 @@ class RemoteClient:
         return client
 
     def create_session(self, sandbox_id: str, client_tag: str = "cli") -> str:
-        # ACP initialize is idempotent; retry through agent-boot races (425).
+        # Initialize is idempotent; retry through agent-boot races (425).
         last = ""
         for _ in range(6):
             resp = self.request("POST", self._proxy(sandbox_id, "initialize"), json={}, timeout=60)
@@ -572,10 +685,9 @@ class RemoteClient:
 
     # -- shell over session/shell + SSE ------------------------------------
 
-    # The platform's SSE sanitizer caps every text field at 8000 chars; output
-    # past that no longer streams, which is what the tee below recovers.
+    # V1 compatibility: its SSE sanitizer caps every text field at 8000 chars.
     _SSE_TEXT_CAP = 8000
-    # The session runtime discards the child's exit code, so the CLI
+    # The V1 session runtime discards the child's exit code, so the CLI
     # appends a sentinel line and parses it out of the collected output. Each shell() call mints
     # its own random-suffixed sentinel so command output can't spoof it.
     _EXIT_SENTINEL_PREFIX = "__SCRIPTIT_CLI_EXIT_"
@@ -603,254 +715,303 @@ class RemoteClient:
         cwd: Optional[str] = None,
         command_timeout_s: Optional[float] = None,
     ) -> Tuple[str, Optional[int]]:
-        """Run ``command`` in the sandbox session; return (output, exit_code).
-
-        Protocol:
-
-        - connect the session SSE stream with a dedicated events-group header
-          (a same-group second subscriber evicts the first — never fight the
-          product UI over its stream), wait for ``load_complete`` so history
-          replay is done;
-        - dispatch the fire-and-forget ``session/shell`` (retrying 409
-          SESSION_BUSY — session ops are serialized);
-        - collect CUMULATIVE per-tool-call output snapshots from
-          ``session_update``/``tool_call_update`` ``content[].content.text``
-          (an update without ``content`` means "unchanged");
-        - finish on ``message_complete`` whose ``parentMessageId`` is our
-          message id (``error`` with ``op == 'shell'`` is the failure path).
-        """
+        """Select the session's wire protocol before submitting one command."""
         sandbox_id = sandbox_id or self.ensure_sandbox()
         session_id = session_id or self.ensure_session(sandbox_id)
-        message_id = make_message_id()
-        # Random per-call suffix: output that happens to contain the static
-        # prefix can't be mistaken for (or forge) this call's exit marker.
-        # Hex only — the sentinel is embedded in a single-quoted printf below.
-        sentinel = f"{self._EXIT_SENTINEL_PREFIX}{secrets.token_hex(8)}__:"
+        command = apply_cwd(command, cwd)
+        with _SessionEvents(self, sandbox_id, session_id) as events:
+            if not events.ready.wait(timeout=60):
+                raise RemoteError("timed out waiting for session event stream bootstrap")
+            if events.error:
+                raise RemoteError(events.error)
+            if events.protocol == 1:
+                return self._shell_v1(
+                    command,
+                    events,
+                    timeout_s,
+                    echo,
+                    command_timeout_s,
+                )
+            if command_timeout_s:
+                command = (
+                    f"timeout {_format_seconds(command_timeout_s)} bash -c {shlex.quote(command)}"
+                )
+            return self._shell_v2(command, events, timeout_s, echo)
 
-        # Every command rides a base64 payload piped into bash: the dispatched
-        # string undergoes one round of double-quote expansion before eval, so
-        # any `$` we ship is read by the wrong shell, and embedded newlines
-        # JSON-escape to `\n` which eval collapses to a literal `n`. Inside the
-        # payload the command arrives verbatim and `$?` is its real status.
-        wrapped = build_shell_wrapper(
-            apply_cwd(command, cwd), sentinel, self._LOG_PATH, command_timeout_s
-        )
+    def _submit_shell(self, command: str, events: _SessionEvents) -> Optional[Dict[str, Any]]:
+        """Retry only a refusal that proves this command was not submitted.
 
-        events_url = f"{self.api_url}{self._proxy(sandbox_id, f'session/{session_id}/events')}"
-        done: "queue.Queue[Optional[str]]" = queue.Queue()
-        ready = threading.Event()
-        buffers: Dict[str, str] = {}
-        buffer_order: List[str] = []
-        lock = threading.Lock()
-        stop = threading.Event()
-
-        # One state variable under `lock`, because "is the stream usable?" and
-        # "has the command been dispatched?" must never be decided against
-        # different snapshots. Read separately, a stream that dies between
-        # `load_complete` and the POST looks alive to the dispatcher and dead
-        # to the reader, and the command goes out with nowhere to collect it —
-        # a failure the caller cannot safely retry, since the side effects
-        # already happened.
-        #
-        #   BOOTSTRAPPING -> LIVE      `load_complete`: history replay done
-        #   LIVE          -> DISPATCHED the POST is about to go out
-        #   DISPATCHED    -> LIVE       409 SESSION_BUSY, retrying
-        #
-        # A death in BOOTSTRAPPING or LIVE cancels dispatch; in DISPATCHED the
-        # command is already running, so it only ends collection.
-        stream_error: List[str] = []
-        state = _STREAM_BOOTSTRAPPING
-
-        def _stream_died(message: str) -> None:
-            nonlocal state
-            with lock:
-                if state == _STREAM_DISPATCHED:
-                    done.put(message)
-                    return
-                stream_error.append(message)
-            ready.set()
-
-        def _reader() -> None:
-            nonlocal state
-            try:
-                headers = self._headers()
-                headers["x-scriptit-events-group"] = "cli"
-                with self._http.get(
-                    events_url, headers=headers, stream=True, timeout=(15, 60)
-                ) as resp:
-                    if resp.status_code != 200:
-                        _stream_died(f"events stream failed ({resp.status_code})")
-                        return
-                    for name, data in _iter_sse_events(resp.iter_lines(decode_unicode=False)):
-                        if stop.is_set():
-                            return
-                        try:
-                            payload = json.loads(data)
-                        except ValueError:
-                            continue
-                        if not isinstance(payload, dict):
-                            continue
-                        if name == "load_complete":
-                            with lock:
-                                if state == _STREAM_BOOTSTRAPPING:
-                                    state = _STREAM_LIVE
-                            ready.set()
-                            continue
-                        if name == "session_update":
-                            update = payload.get("update") or {}
-                            kind = update.get("sessionUpdate")
-                            call_id = update.get("toolCallId")
-                            if not call_id:
-                                continue
-                            # The armed check lives INSIDE the lock: the 409
-                            # retry path disarms + clears under it, so a
-                            # stale event can't repopulate right after.
-                            if kind == "tool_call":
-                                with lock:
-                                    if state != _STREAM_DISPATCHED:
-                                        continue
-                                    if call_id not in buffers:
-                                        buffers[call_id] = ""
-                                        buffer_order.append(call_id)
-                            elif kind == "tool_call_update":
-                                content = update.get("content")
-                                if not isinstance(content, list):
-                                    continue  # unchanged snapshot (deduped) or malformed
-                                text = "".join(
-                                    (item.get("content") or {}).get("text", "")
-                                    for item in content
-                                    if isinstance(item, dict)
-                                    and item.get("type") == "content"
-                                    and isinstance(item.get("content"), dict)
-                                )
-                                with lock:
-                                    if state != _STREAM_DISPATCHED:
-                                        continue
-                                    if call_id not in buffers:
-                                        buffers[call_id] = ""
-                                        buffer_order.append(call_id)
-                                    # Snapshots are cumulative — replace.
-                                    buffers[call_id] = text
-                        elif name == "message_complete":
-                            if payload.get("parentMessageId") == message_id:
-                                done.put(None)
-                                return
-                        elif name == "error":
-                            if (
-                                payload.get("parentMessageId") == message_id
-                                and payload.get("op") == "shell"
-                            ):
-                                done.put(str(payload.get("message") or "shell dispatch failed"))
-                                return
-                # Falling out of the event loop is a third terminal outcome,
-                # alongside a terminal event and an exception: the server
-                # ended the stream without either. That happens when a second
-                # subscriber in the same group takes over the stream — which
-                # it does whenever the session is opened in the app —
-                # so without this the caller waits out the full command
-                # timeout for a verdict that is never coming.
-                _stream_died("events stream closed before the command reported back")
-            except requests.RequestException as exc:
-                _stream_died(f"events stream dropped: {exc}")
-            except Exception as exc:
-                # Never leave the main thread waiting out the full command
-                # timeout for a reader that has already given up.
-                _stream_died(f"events stream unexpected error: {exc!r}")
-
-        reader = threading.Thread(target=_reader, daemon=True)
-        reader.start()
-        if not ready.wait(timeout=60):
-            stop.set()
-            raise RemoteError("timed out waiting for session event stream bootstrap")
-        # Dispatch, riding out SESSION_BUSY (another op — e.g. a UI prompt —
-        # is running; ops are serialized per session).
-        busy_deadline = time.time() + 60
+        An ambiguous v2 response leaves collection running: the matching start
+        or completed row can still establish the command's outcome.
+        """
+        deadline = time.monotonic() + 60
         while True:
-            # The liveness check and the arming are one critical section, so
-            # a stream that dies here either loses the race (dispatch goes out
-            # and the death becomes a collection error) or wins it (nothing is
-            # dispatched at all). What it can never do is both.
-            #
-            # Arming just BEFORE each attempt matters on its own: session/shell
-            # is fire-and-forget on a separate connection, so a fast command's
-            # events can arrive before the POST response does — but staying
-            # armed through the 409 retry sleep would capture the concurrent
-            # op's output.
-            with lock:
-                failure = stream_error[0] if stream_error else None
-                if failure is None:
-                    state = _STREAM_DISPATCHED
-            if failure is not None:
-                stop.set()
-                raise RemoteError(failure)
-            resp = self.request(
-                "POST",
-                self._proxy(sandbox_id, f"session/{session_id}/shell"),
-                json={"command": wrapped, "message_id": message_id},
-                timeout=60,
-            )
+            events.arm()
+            try:
+                resp = self.request(
+                    "POST",
+                    self._proxy(events.sandbox_id, f"session/{events.session_id}/shell"),
+                    json={"command": command, "message_id": events.message_id},
+                    wake_on_503=False,
+                    timeout=60,
+                )
+            except RemoteError:
+                if events.protocol == 2:
+                    return None
+                raise
+            if resp.status_code in (200, 202) and events.protocol == 1:
+                return None
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
             if resp.status_code in (200, 202):
-                break
-            if resp.status_code == 409 and time.time() < busy_deadline:
+                shell = body.get("shell")
+                if body.get("message_id") == events.message_id and isinstance(shell, dict):
+                    return shell
+                return None
+            detail = body
+            while isinstance(detail.get("detail"), dict):
+                detail = detail["detail"]
+            code = detail.get("code")
+            refused = (resp.status_code == 409 and code == "SESSION_BUSY") or (
+                resp.status_code == 503
+                and (
+                    code == "SHELL_NOT_SUBMITTED"
+                    or detail.get("submission_state") == "not_submitted"
+                )
+            )
+            if refused and time.monotonic() < deadline:
+                retry_ms = detail.get("retry_after_ms")
+                delay = (
+                    max(0, retry_ms / 1000)
+                    if isinstance(retry_ms, (int, float))
+                    else _BUSY_RETRY_SECONDS
+                )
                 resp.close()
-                # Back to LIVE: nothing of ours is running, so a stream death
-                # during the retry sleep must cancel the next attempt rather
-                # than be filed as a collection failure. The concurrent op's
-                # tool output may have been captured while armed — drop it so
-                # it can't pollute our result.
-                with lock:
-                    if state == _STREAM_DISPATCHED:
-                        state = _STREAM_LIVE
-                    buffers.clear()
-                    buffer_order.clear()
-                time.sleep(_BUSY_RETRY_SECONDS)
+                events.disarm()
+                time.sleep(min(delay, max(0, deadline - time.monotonic())))
                 continue
-            stop.set()
+            if (
+                events.protocol == 2
+                and resp.status_code >= 500
+                and not refused
+                and code not in ("SHELL_NOT_SUBMITTED", "SESSION_MATERIALIZE_FAILED")
+                and detail.get("submission_state") != "not_submitted"
+            ):
+                return None
             raise RemoteError(f"shell dispatch failed ({resp.status_code}): {resp.text[:300]}")
 
-        def _combined() -> str:
-            with lock:
-                return "".join(buffers[c] for c in buffer_order)
+    def _shell_v2(
+        self,
+        command: str,
+        events: _SessionEvents,
+        timeout_s: float,
+        echo: bool,
+    ) -> Tuple[str, Optional[int]]:
+        shell = self._submit_shell(command, events)
+        shell_id = shell.get("id") if shell else None
+        result: Optional[Dict[str, Any]] = None
+        cursor = 0
+        chunks: List[str] = []
+        deadline = time.monotonic() + timeout_s
 
-        # Echo loop: print appended output as snapshots grow, holding back a
-        # small tail so the exit sentinel never reaches the terminal.
+        def append(text: str) -> None:
+            chunks.append(text)
+            if echo:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+
+        def observe(name: str, payload: Dict[str, Any]) -> None:
+            nonlocal shell_id, result
+            if name == "session_snapshot":
+                for row in payload.get("rows", []):
+                    if row.get("type") != "shell" or row.get("id") != events.message_id:
+                        continue
+                    shell_id = row.get("shellID")
+                    if row.get("status") != "running":
+                        result = row
+            elif name == "session_event":
+                kind = payload.get("type")
+                if kind not in ("session.shell.started", "session.shell.ended"):
+                    return
+                data = payload.get("data") or {}
+                info = data.get("shell") or {}
+                own_message = (info.get("metadata") or {}).get("messageID") == events.message_id
+                if not own_message and (not shell_id or info.get("id") != shell_id):
+                    return
+                shell_id = info.get("id")
+                if kind == "session.shell.ended":
+                    result = {**info, "output": data.get("output")}
+
+        while True:
+            frame = events.poll(0)
+            while frame is not None:
+                observe(*frame)
+                frame = events.poll(0)
+            if time.monotonic() >= deadline:
+                if result is not None:
+                    raise RemoteError("complete shell output could not be recovered")
+                raise RemoteError(
+                    "command completion could not be confirmed; it may still be running. "
+                    "Check `scriptit session current` before re-running."
+                )
+            if shell_id:
+                try:
+                    resp = self.request(
+                        "GET",
+                        self._proxy(
+                            events.sandbox_id,
+                            f"session/{events.session_id}/shell/{shell_id}/output",
+                        ),
+                        params={"cursor": cursor, "limit": 65536},
+                        wake_on_503=False,
+                        timeout=min(30, max(0.1, deadline - time.monotonic())),
+                    )
+                except RemoteError:
+                    resp = None
+                if resp is None or resp.status_code >= 500 or resp.status_code in (408, 429):
+                    # Reads can resume from the same cursor after a network
+                    # drop; submission is never repeated to recover output.
+                    frame = events.poll(min(0.5, max(0, deadline - time.monotonic())))
+                    if frame is not None:
+                        observe(*frame)
+                    continue
+                if resp.status_code == 404:
+                    if result is not None:
+                        saved = result.get("output")
+                        if (
+                            not isinstance(saved, dict)
+                            or saved.get("truncated") is not False
+                            or type(saved.get("size")) is not int
+                            or saved.get("cursor") != saved["size"]
+                            or not isinstance(saved.get("output"), str)
+                        ):
+                            raise RemoteError("complete shell output is no longer available")
+                        collected = "".join(chunks)
+                        if not saved["output"].startswith(collected):
+                            raise RemoteError(
+                                "persisted shell output does not match collected output"
+                            )
+                        append(saved["output"][len(collected) :])
+                        break
+                elif resp.status_code == 200:
+                    try:
+                        page = resp.json()
+                    except ValueError as exc:
+                        raise RemoteError("shell output returned invalid JSON") from exc
+                    if (
+                        not isinstance(page, dict)
+                        or not isinstance(page.get("output"), str)
+                        or type(page.get("cursor")) is not int
+                        or type(page.get("size")) is not int
+                        or not cursor <= page["cursor"] <= page["size"]
+                        or page.get("truncated") is not False
+                    ):
+                        raise RemoteError("shell output returned an incomplete page")
+                    next_cursor = page["cursor"]
+                    if page["output"] and next_cursor == cursor:
+                        raise RemoteError("shell output did not advance its byte cursor")
+                    if next_cursor > cursor and not page["output"]:
+                        raise RemoteError("shell output omitted captured bytes")
+                    append(page["output"])
+                    advanced = next_cursor > cursor
+                    cursor = next_cursor
+                    if result is not None and cursor == page["size"]:
+                        saved = result.get("output")
+                        saved = saved if isinstance(saved, dict) else {}
+                        if isinstance(saved.get("size"), int) and cursor < saved["size"]:
+                            raise RemoteError("shell output ended before its recorded size")
+                        break
+                    if cursor < page["size"]:
+                        if advanced:
+                            continue
+                        if result is not None:
+                            raise RemoteError("shell output ended before its recorded size")
+                else:
+                    raise RemoteError(
+                        f"shell output failed ({resp.status_code}): {resp.text[:300]}"
+                    )
+            frame = events.poll(0.1)
+            if frame is not None:
+                observe(*frame)
+
+        output = "".join(chunks)
+        status = result.get("status")
+        exit_code = result.get("exit")
+        if status not in ("exited", "timeout", "killed"):
+            exit_code = None
+        elif type(exit_code) is not int or (exit_code == 0 and status != "exited"):
+            exit_code = {"timeout": 124, "killed": 130}.get(status)
+        return output, exit_code
+
+    def _shell_v1(
+        self,
+        command: str,
+        events: _SessionEvents,
+        timeout_s: float,
+        echo: bool,
+        command_timeout_s: Optional[float],
+    ) -> Tuple[str, Optional[int]]:
+        """Compatibility with load_complete/tool_call_update sandbox streams."""
+        sentinel = f"{self._EXIT_SENTINEL_PREFIX}{secrets.token_hex(8)}__:"
+        wrapped = build_shell_wrapper(command, sentinel, self._LOG_PATH, command_timeout_s)
+        self._submit_shell(wrapped, events)
+        buffers: Dict[str, str] = {}
         holdback = len(sentinel) + 16
         printed_len = 0
-        error: Optional[str] = None
-        deadline = time.time() + timeout_s
+        deadline = time.monotonic() + timeout_s
         while True:
-            try:
-                # Short poll so live echo flushes promptly.
-                error = done.get(timeout=0.1)
-                break
-            except queue.Empty:
-                pass
+            frame = events.poll()
+            if frame is not None:
+                name, payload = frame
+                if name == "session_update":
+                    update = payload.get("update") or {}
+                    call_id = update.get("toolCallId")
+                    content = update.get("content")
+                    if call_id and update.get("sessionUpdate") == "tool_call":
+                        buffers.setdefault(call_id, "")
+                    elif call_id and isinstance(content, list):
+                        buffers[call_id] = "".join(
+                            (item.get("content") or {}).get("text", "")
+                            for item in content
+                            if isinstance(item, dict)
+                            and item.get("type") == "content"
+                            and isinstance(item.get("content"), dict)
+                        )
+                elif (
+                    name == "message_complete"
+                    and payload.get("parentMessageId") == events.message_id
+                ):
+                    break
+                elif (
+                    name == "error"
+                    and payload.get("parentMessageId") == events.message_id
+                    and payload.get("op") == "shell"
+                ):
+                    raise RemoteError(str(payload.get("message") or "shell dispatch failed"))
             if echo:
-                text = _combined()
+                text = "".join(buffers.values())
                 visible = max(0, len(text) - holdback)
                 if visible > printed_len:
                     sys.stdout.write(text[printed_len:visible])
                     sys.stdout.flush()
                     printed_len = visible
-            if time.time() >= deadline:
-                error = f"timed out after {int(timeout_s)}s waiting for command completion"
-                break
-        stop.set()
+            if time.monotonic() >= deadline:
+                raise RemoteError(
+                    f"timed out after {int(timeout_s)}s waiting for command completion"
+                )
 
-        raw = _combined()
+        raw = "".join(buffers.values())
         output, exit_code = split_exit_sentinel(raw, sentinel)
         truncated = exit_code is None and len(raw) >= self._SSE_TEXT_CAP - 100
-
-        # The live stream lost the tail (and with it the sentinel) — every
-        # dispatch tees its full output to log_path, so read that back
-        # instead of reporting an unknown exit status on a command that
-        # actually ran to completion (e.g. `scriptit describe --concepts`,
-        # which alone is ~23KB — well past the live cap).
         if truncated:
             try:
                 uid = self._own_user_id()
-                full_path = f"/workspaces/user_{uid}/.sessions/{session_id}/{self._LOG_PATH}"
-                recovered_raw = self.fs_read(sandbox_id, full_path).decode(
+                full_path = f"/workspaces/user_{uid}/.sessions/{events.session_id}/{self._LOG_PATH}"
+                recovered_raw = self.fs_read(events.sandbox_id, full_path).decode(
                     "utf-8", errors="replace"
                 )
                 recovered_output, recovered_code = split_exit_sentinel(recovered_raw, sentinel)
@@ -858,24 +1019,17 @@ class RemoteClient:
                     output, exit_code = recovered_output, recovered_code
                     truncated = False
             except ScriptItError:
-                pass  # fall through — still reported as unknown below
-
+                pass
         if echo:
-            visible_out = output
-            if len(visible_out) > printed_len:
-                sys.stdout.write(visible_out[printed_len:])
-            if visible_out and not visible_out.endswith("\n"):
+            sys.stdout.write(output[printed_len:])
+            if output and not output.endswith("\n"):
                 sys.stdout.write("\n")
             if truncated:
                 sys.stdout.write(
                     "[scriptit: live output truncated at ~8KB by the platform event "
-                    "stream — redirect to a file and use `scriptit fs read` for full "
-                    "output]\n"
+                    "stream — redirect to a file and use `scriptit fs read` for full output]\n"
                 )
             sys.stdout.flush()
-
-        if error:
-            raise RemoteError(error)
         return output, exit_code
 
     # -- files -------------------------------------------------------------
@@ -949,8 +1103,7 @@ def remote_dispatch_if_applicable(argv: List[str]) -> Optional[int]:
         return _interrupted_exit()
 
 
-# Exit status when the command ran but its real status is unknowable (the
-# exit sentinel was lost to the platform's ~8KB live-output cap). Unknown is
+# Exit status when the command ran but its real status is unknowable. Unknown is
 # NOT success — callers driving the CLI must not proceed as if it passed.
 UNKNOWN_EXIT_CODE = 125
 
@@ -976,9 +1129,8 @@ def _interrupted_exit() -> int:
 
 def _unknown_exit() -> int:
     sys.stderr.write(
-        f"scriptit: command completed but its exit status is unknown "
-        f"(output exceeded the live stream cap) — exiting {UNKNOWN_EXIT_CODE}; "
-        "redirect output to a file to get a real status\n"
+        f"scriptit: command completed but its exit status is unknown — exiting {UNKNOWN_EXIT_CODE}; "
+        "check the session before re-running\n"
     )
     return UNKNOWN_EXIT_CODE
 

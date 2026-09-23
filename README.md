@@ -285,12 +285,15 @@ platform instead of being copied into each CLI release.
   interleaving; the client waits for you.
 - **Paused environments wake automatically.** Any command resumes yours and
   waits until it is ready, so there is nothing to start by hand.
-- **Live output is capped at ~8KB** by the platform's event stream. The client
-  also tees each command to a file and reads the remainder back, so you get
-  complete output and a real exit code anyway. Script runs report structured
-  state regardless of size.
+- **V2 output is read in full, in pages.** Commands stay readable in the app,
+  and their actual exit codes reach your terminal. The saved transcript preview
+  can be shorter than the output returned to the CLI. Older v1 environments use
+  a separate compatibility path that recovers output beyond their SSE text cap.
+- **V2 event connections can reconnect.** The client resumes from its last
+  event cursor without submitting the command again. Missing output or an
+  unconfirmed result is reported as an error, never success.
 - **No interactive shell.** Commands are dispatched fire-and-forget and their
-  output is collected from an event stream, with no channel for stdin — so
+  lifecycle is observed through an event stream, with no channel for stdin — so
   `scriptit exec -- vim` cannot work. Use one-shot commands, or the app.
 - **Update notices, not auto-update.** The client checks at most once a day, in
   the background, and prints one line to stderr when a newer release exists.
