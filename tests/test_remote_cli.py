@@ -582,18 +582,39 @@ def test_the_client_owns_no_agent_behavior_prompt() -> None:
 def test_exec_options_parse_before_the_separator() -> None:
     """Only what precedes `--` is ours; the command keeps its own flags, or a
     wrapped tool loses the arguments it was invoked for."""
-    args, cwd, timeout = remote._parse_exec_options(
+    args, cwd, timeout, help_requested = remote._parse_exec_options(
         ["--cwd", "/workspaces/w", "--timeout", "30", "--", "pytest", "--timeout", "5"]
     )
     assert args == ["pytest", "--timeout", "5"]
-    assert cwd == "/workspaces/w" and timeout == 30.0
+    assert cwd == "/workspaces/w" and timeout == 30.0 and not help_requested
 
-    assert remote._parse_exec_options(["--cwd=/w", "--", "ls"]) == (["ls"], "/w", None)
-    assert remote._parse_exec_options(["ls", "-la"]) == (["ls", "-la"], None, None)
+    assert remote._parse_exec_options(["--cwd=/w", "--", "ls"]) == (["ls"], "/w", None, False)
+    assert remote._parse_exec_options(["ls", "-la"]) == (["ls", "-la"], None, None, False)
     with pytest.raises(remote.RemoteError):
         remote._parse_exec_options(["--timeout", "soon", "--", "ls"])
     with pytest.raises(remote.RemoteError):
         remote._parse_exec_options(["--timeout", "0", "--", "ls"])
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_exec_help_is_local_only_in_the_option_prefix(flag, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(remote, "RemoteClient", lambda: pytest.fail("help tried to connect"))
+    assert remote.remote_exec([flag]) == 0
+    assert "usage: scriptit exec" in capsys.readouterr().out
+    assert remote.remote_exec(["--cwd", "/workspaces/w", flag, "--", "echo"]) == 0
+    assert "usage: scriptit exec" in capsys.readouterr().out
+
+    calls = []
+
+    class Client:
+        def shell(self, command, **kwargs):
+            calls.append(command)
+            return "", 0
+
+    monkeypatch.setattr(remote, "RemoteClient", Client)
+    assert remote.remote_exec(["--", flag]) == 0
+    assert remote.remote_exec(["echo", flag]) == 0
+    assert calls == [flag, f"echo {flag}"]
 
 
 def test_cwd_change_stays_inside_the_teed_subshell() -> None:

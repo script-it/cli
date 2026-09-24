@@ -1154,7 +1154,7 @@ def _parse_timeout(value: str) -> float:
     return seconds
 
 
-def _parse_exec_options(argv: List[str]) -> Tuple[List[str], Optional[str], Optional[float]]:
+def _parse_exec_options(argv: List[str]) -> Tuple[List[str], Optional[str], Optional[float], bool]:
     """Split client flags off the front of ``exec``'s arguments.
 
     Only what precedes ``--`` is inspected, so the command keeps its own
@@ -1166,6 +1166,8 @@ def _parse_exec_options(argv: List[str]) -> Tuple[List[str], Optional[str], Opti
     flags = {"--cwd": "cwd", "--timeout": "timeout"}
     while args and args[0] != "--":
         token = args[0]
+        if token in ("--help", "-h"):
+            return [], cwd, timeout, True
         name = flags.get(token)
         if name is not None:
             # `--` is the separator, never a value: consuming it would make
@@ -1187,18 +1189,22 @@ def _parse_exec_options(argv: List[str]) -> Tuple[List[str], Optional[str], Opti
             timeout = _parse_timeout(value)
     if args and args[0] == "--":
         args = args[1:]
-    return args, cwd, timeout
+    return args, cwd, timeout, False
 
 
 def remote_exec(argv: List[str]) -> int:
     """``scriptit exec [--cwd DIR] [--timeout SECS] [--] <cmd...>``."""
     try:
-        args, cwd, command_timeout = _parse_exec_options(argv)
+        args, cwd, command_timeout, help_requested = _parse_exec_options(argv)
     except RemoteError as exc:
         sys.stderr.write(f"scriptit: {exc}\n")
         return 2
-    if not args:
-        sys.stderr.write("usage: scriptit exec [--cwd DIR] [--timeout SECS] -- <command...>\n")
+    if help_requested or not args:
+        stream = sys.stdout if help_requested else sys.stderr
+        stream.write("usage: scriptit exec [--cwd DIR] [--timeout SECS] -- <command...>\n")
+        if help_requested:
+            stream.write("Run a shell command in the current sandbox session.\n")
+            return 0
         return 2
     try:
         client = RemoteClient()
