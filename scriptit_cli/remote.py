@@ -368,9 +368,9 @@ class _SessionEvents:
                         if self.protocol is None and name in ("load_complete", "session_snapshot"):
                             self.protocol = 1 if name == "load_complete" else 2
                             self.ready.set()
-                        if name == "error" and (self.protocol == 2 or self.protocol is None):
+                        if name == "error" and self.protocol != 1:
                             message = str(payload.get("message") or "session event stream failed")
-                            if self.protocol == 2 and payload.get("retryable") is True:
+                            if payload.get("retryable") is True:
                                 raise requests.RequestException(message)
                             self._fail(message)
                             return
@@ -387,7 +387,7 @@ class _SessionEvents:
                 return
             finally:
                 self.response = None
-            if self.protocol != 2:
+            if self.protocol == 1:
                 self._fail(message)
                 return
             self.stop.wait(1)
@@ -779,7 +779,7 @@ class RemoteClient:
             refused = (resp.status_code == 409 and code == "SESSION_BUSY") or (
                 resp.status_code == 503
                 and (
-                    code == "SHELL_NOT_SUBMITTED"
+                    code in {"SHELL_NOT_SUBMITTED", "SANDBOX_RESUMING", "SANDBOX_UPDATING"}
                     or detail.get("submission_state") == "not_submitted"
                 )
             )

@@ -982,8 +982,10 @@ def test_stream_failure_before_bootstrap_blocks_the_dispatch(
     )
 
     class _Ctx:
+        status_code = 400
+
         def __enter__(self):
-            raise remote.requests.RequestException("offline")
+            return self
 
         def __exit__(self, *a):
             return False
@@ -995,6 +997,72 @@ def test_stream_failure_before_bootstrap_blocks_the_dispatch(
     with pytest.raises(remote.RemoteError, match="events stream"):
         client.shell("echo hi")
     assert posted == [], f"dispatched anyway: {posted}"
+
+
+@pytest.mark.parametrize("first_failure", ["retryable_error", "disconnect", "server_503"])
+def test_transient_stream_failure_before_bootstrap_reconnects_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch, first_failure: str
+) -> None:
+    connections = []
+    submitted = threading.Event()
+    sent = {}
+
+    def lines():
+        yield from _sse("session_snapshot", {"rows": []}, "1")
+        assert submitted.wait(5)
+        yield from _sse(
+            "session_event",
+            {
+                "type": "session.shell.ended",
+                "data": {
+                    "shell": {
+                        "id": "sh_ours",
+                        "status": "exited",
+                        "exit": 0,
+                        "metadata": {"messageID": sent["message_id"]},
+                    },
+                    "output": {"output": "ok", "cursor": 2, "size": 2, "truncated": False},
+                },
+            },
+            "2",
+        )
+
+    def disconnected():
+        raise remote.requests.RequestException("connection reset")
+
+    def get_response(*args, **kwargs):
+        connections.append(kwargs["headers"])
+        if len(connections) == 1:
+            if first_failure == "retryable_error":
+                return _EventResponse(
+                    lambda: _sse("error", {"retryable": True, "message": "warming up"})
+                )
+            if first_failure == "disconnect":
+                return _EventResponse(disconnected)
+            return _json_response({}, 503)
+        return _EventResponse(lines)
+
+    def request(self, method, path, **kwargs):
+        if method == "POST":
+            assert len(connections) == 2
+            sent.update(kwargs["json"])
+            submitted.set()
+            return _json_response(
+                {"message_id": sent["message_id"], "shell": {"id": "sh_ours"}}, 202
+            )
+        return _json_response(
+            {
+                "output": "ok" if kwargs["params"]["cursor"] == 0 else "",
+                "cursor": 2,
+                "size": 2,
+                "truncated": False,
+            }
+        )
+
+    monkeypatch.setattr(remote.RemoteClient, "request", request)
+    client = _client_for_stream_test(monkeypatch, get_response)
+    assert client.shell("echo ok", timeout_s=5, echo=False) == ("ok", 0)
+    assert len(connections) == 2
 
 
 def test_stream_failure_after_bootstrap_ends_collection_promptly(
@@ -1327,6 +1395,8 @@ def test_native_shell_pages_full_output_and_recovers_its_own_result(
     [
         ((409, {"detail": {"code": "SESSION_BUSY", "retry_after_ms": 25}}), 2),
         ((503, {"detail": {"code": "SHELL_NOT_SUBMITTED", "retry_after_ms": 50}}), 2),
+        ((503, {"detail": {"code": "SANDBOX_UPDATING", "retry_after_ms": 50}}), 2),
+        ((503, {"detail": {"code": "SANDBOX_RESUMING", "retry_after_ms": 50}}), 2),
         (
             (
                 503,
