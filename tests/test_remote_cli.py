@@ -524,7 +524,22 @@ def test_fs_push_sends_and_reports_the_canonical_remote_path(monkeypatch, capsys
     assert capsys.readouterr().out == ("Pushed report.csv -> /workspaces/ws/report.csv\n")
 
 
-def test_session_new_only_creates_the_session(monkeypatch, capsys) -> None:
+@pytest.mark.parametrize(
+    ("initialized", "new_session_body"),
+    [
+        pytest.param(
+            {"protocolVersion": 1, "agentCapabilities": {}},
+            {"cwd": "/workspaces", "mcpServers": []},
+            id="v1-bridge",
+        ),
+        pytest.param({"initialized": True}, {}, id="v2-bridge"),
+    ],
+)
+def test_session_new_only_creates_the_session(
+    monkeypatch, capsys, initialized, new_session_body
+) -> None:
+    """The `/session/new` body follows the bridge `/initialize` reveals: a v1
+    bridge requires the ACP session fields, and a v2 bridge refuses them."""
     from scriptit_cli import commands
 
     calls = []
@@ -542,6 +557,8 @@ def test_session_new_only_creates_the_session(monkeypatch, capsys) -> None:
         @staticmethod
         def request(method, path, **kwargs):
             calls.append((method, path, kwargs))
+            if path.endswith("/initialize"):
+                return _json_response(initialized)
             return _json_response({"sessionId": "ses_42"})
 
         @staticmethod
@@ -558,7 +575,7 @@ def test_session_new_only_creates_the_session(monkeypatch, capsys) -> None:
     assert calls[1] == (
         "POST",
         "/api/v1/sandbox/sbx_1/proxy/session/new",
-        {"json": {"cwd": "/workspaces", "mcpServers": []}, "timeout": 60},
+        {"json": new_session_body, "timeout": 60},
     )
 
 
@@ -968,12 +985,31 @@ def _client_for_stream_test(monkeypatch, get_response):
     return client
 
 
+@pytest.mark.parametrize(
+    ("stream", "message"),
+    [
+        pytest.param(
+            lambda: _json_response({"code": "CLI_UPGRADE_REQUIRED", "message": "Upgrade it."}, 426),
+            r"events stream failed \(426\): Upgrade it\.",
+            id="refused",
+        ),
+        pytest.param(
+            lambda: _EventResponse(
+                lambda: _sse("session_snapshot", {"rows": [], "wire": {"version": 2}}, "1")
+            ),
+            "stream is version 2 and scriptit-cli .* reads version 1: upgrade scriptit-cli",
+            id="another-wire-version",
+        ),
+    ],
+)
 def test_stream_failure_before_bootstrap_blocks_the_dispatch(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, stream, message: str
 ) -> None:
     """The command must not be POSTed when there is nowhere to collect its
     output — otherwise the caller sees a failure for work that already ran,
-    and retrying repeats its side effects."""
+    and retrying repeats its side effects. The stream says why: a refusal
+    carries its message, and a stream on another wire version asks for an
+    upgrade instead of letting the command wait out its timeout."""
     posted = []
     monkeypatch.setattr(
         remote.RemoteClient,
@@ -981,20 +1017,8 @@ def test_stream_failure_before_bootstrap_blocks_the_dispatch(
         lambda self, method, path, **kw: posted.append(path),
     )
 
-    class _Ctx:
-        status_code = 400
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def close(self):
-            pass
-
-    client = _client_for_stream_test(monkeypatch, lambda *a, **k: _Ctx())
-    with pytest.raises(remote.RemoteError, match="events stream"):
+    client = _client_for_stream_test(monkeypatch, lambda *a, **k: stream())
+    with pytest.raises(remote.RemoteError, match=message):
         client.shell("echo hi")
     assert posted == [], f"dispatched anyway: {posted}"
 
@@ -1130,6 +1154,9 @@ def test_logout_all_empties_under_the_lock_and_reports_truthfully() -> None:
 
 
 def _sse(event: str, payload: dict, event_id=None):
+    if event == "session_snapshot":
+        # Every v2 snapshot names the bridge's wire version; a payload may name another.
+        payload = {"wire": {"version": remote.WIRE_VERSION, "opencode": "0" * 64}, **payload}
     if event_id is not None:
         yield f"id: {event_id}".encode()
     yield f"event: {event}".encode()

@@ -28,6 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
+from scriptit_cli import __version__
 from scriptit_cli.analytics import analytics
 from scriptit_cli.client import detect_client
 from scriptit_cli.config import _config_dir
@@ -64,6 +65,11 @@ CLIENT_COMMANDS = {
 
 # How long to wait out a 409 SESSION_BUSY before re-attempting dispatch.
 _BUSY_RETRY_SECONDS = 3
+
+# The v2 session-stream version this client reads: the bridge's frames and the
+# native shell events matched below. Every v2 snapshot names the bridge's own
+# (`WIRE_VERSION` in the platform's `sandbox/src/native/wire.ts`).
+WIRE_VERSION = 1
 
 
 def make_message_id() -> str:
@@ -278,6 +284,25 @@ def _iter_sse_events(lines: Iterable[bytes]) -> Iterable[Tuple[str, str, Optiona
         yield event_name, "\n".join(data_lines), event_id
 
 
+def _error_message(resp: requests.Response) -> str:
+    """An error response's own message: its JSON `message`, `error` or
+    `detail`, else the start of its text."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        for key in ("message", "error", "detail"):
+            if isinstance(body.get(key), str):
+                return body[key]
+    return resp.text[:300]
+
+
+def _wire_version(snapshot: Dict[str, Any]) -> Any:
+    wire = snapshot.get("wire")
+    return wire.get("version") if isinstance(wire, dict) else None
+
+
 class _SessionEvents:
     """One invocation's event listener; v2 reconnects resume its durable cursor."""
 
@@ -351,7 +376,7 @@ class _SessionEvents:
                     if resp.status_code != 200:
                         message = f"events stream failed ({resp.status_code})"
                         if resp.status_code < 500:
-                            self._fail(message)
+                            self._fail(f"{message}: {_error_message(resp)}")
                             return
                         raise requests.RequestException(message)
                     for name, data, event_id in _iter_sse_events(
@@ -365,6 +390,15 @@ class _SessionEvents:
                             continue
                         if not isinstance(payload, dict):
                             continue
+                        if name == "session_snapshot" and _wire_version(payload) != WIRE_VERSION:
+                            # Its shell events may not be the ones matched below,
+                            # so waiting could only end at the command timeout.
+                            self._fail(
+                                "this sandbox's session stream is version "
+                                f"{_wire_version(payload)} and scriptit-cli {__version__} "
+                                f"reads version {WIRE_VERSION}: upgrade scriptit-cli"
+                            )
+                            return
                         if self.protocol is None and name in ("load_complete", "session_snapshot"):
                             self.protocol = 1 if name == "load_complete" else 2
                             self.ready.set()
@@ -607,12 +641,17 @@ class RemoteClient:
             time.sleep(3)
         else:
             raise RemoteError(f"sandbox agent initialize failed ({last})")
+        # A v1 bridge answers with the ACP initialize result and requires the
+        # ACP session fields; a v2 bridge derives the session itself and
+        # refuses unknown fields.
+        v1 = "protocolVersion" in resp.json()
+        new_session_body = {"cwd": "/workspaces", "mcpServers": []} if v1 else {}
 
         for _ in range(4):
             resp = self.request(
                 "POST",
                 self._proxy(sandbox_id, "session/new"),
-                json={"cwd": "/workspaces", "mcpServers": []},
+                json=new_session_body,
                 timeout=60,
             )
             if resp.status_code == 200:
@@ -620,6 +659,10 @@ class RemoteClient:
                 session_id = body.get("sessionId") or (body.get("session") or {}).get("id")
                 if session_id:
                     break
+            elif 400 <= resp.status_code < 500:
+                raise RemoteError(
+                    f"session/new failed ({resp.status_code}): {_error_message(resp)}"
+                )
             time.sleep(2)
         else:
             raise RemoteError("session/new failed")
