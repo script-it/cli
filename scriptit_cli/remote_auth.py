@@ -386,14 +386,15 @@ def keycloak_device_login(
     """Run the OAuth device grant against a Keycloak realm; returns the
     credential fields to store (token_url/client_id/refresh_token/...).
 
-    Requires the realm client to have the device grant enabled; Keycloak
-    reports ``unauthorized_client`` otherwise, which is surfaced verbatim.
+    Requires the realm client to exist with the device grant enabled;
+    Keycloak reports ``invalid_client`` or ``unauthorized_client`` otherwise,
+    which is surfaced verbatim.
 
-    PKCE rides along because the advertised client is the platform's browser
-    client, which pins ``pkce.code.challenge.method``: Keycloak enforces that
-    on the device endpoint too and rejects a challenge-less request with
-    ``Missing parameter: code_challenge_method``. Sending it is correct for a
-    public client regardless of whether the realm demands it.
+    PKCE rides along because both realm clients the platform ships pin
+    ``pkce.code.challenge.method``: Keycloak enforces that on the device
+    endpoint too and rejects a challenge-less request with ``Missing
+    parameter: code_challenge_method``. Sending it is correct for a public
+    client regardless of whether the realm demands it.
     """
     base = f"{keycloak_url.rstrip('/')}/realms/{realm}/protocol/openid-connect"
     verifier, challenge = _pkce_pair()
