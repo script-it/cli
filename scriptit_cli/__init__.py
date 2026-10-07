@@ -5,7 +5,7 @@ verbs into the sandbox and streams back output, so the sandbox's own CLI stays
 the single behavior surface and no automation ever executes locally.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Oldest sandbox CLI that answers everything this client forwards or parses:
 # `scriptit skills list|show`, `scriptit describe --concepts`, and bare-name

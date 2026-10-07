@@ -13,8 +13,8 @@ pytest
 ```
 
 The suite is fast and needs no network or account — it covers the pure pieces
-(command wrapping, exit-sentinel parsing, SSE framing, the credential store,
-session resolution). Anything that needs a live environment is exercised by
+(v2 output paging and reconnects, v1 command wrapping and exit-sentinel
+parsing, SSE framing, the credential store, session resolution). Anything that needs a live environment is exercised by
 hand against a real account before release.
 
 `tests/conftest.py` points `XDG_CONFIG_HOME` at a temp directory for every
@@ -33,20 +33,18 @@ That boundary is what lets the platform ship features without a client release,
 and it is easy to erode by accident. If a change needs the runtime, it belongs
 in the platform, not here.
 
-**Where it is currently eroded, and why it matters.** `remote.py` encodes a
-fair amount of the sandbox agent's private behaviour: it mints message ids in
-the agent's branded format, base64-wraps every command because the agent
-`eval`s what it is given, appends an exit sentinel because the agent discards
-the child's status, and tees output to a file because the event stream
-truncates text. None of that is knowledge a client should hold. It is here
-because the session-shell API asks callers to supply it — the platform's own
-frontend and backend each carry a copy of the same message-id generator.
+`remote.py` supports two deployed session transports. The initial SSE frame
+selects one before dispatch: v2 uses `session_snapshot`, v1 uses
+`load_complete`. V2 sends plain commands, reads output by byte cursor and
+gets exit status from shell events or a saved shell row. V1 requires base64
+wrapping, an exit sentinel and file recovery after its SSE text cap; keep that
+compatibility code isolated.
 
-The asymmetry is what makes it worth fixing rather than living with: those two
-are deployed, so a change reaches them in minutes, while an installed client is
-frozen until its owner upgrades. The fix is for that API to accept a plain
-command and return a real exit code, which would delete most of `shell()`. Do
-not add to this pile.
+A shell POST is not safe to repeat after a lost response. Retry only a refusal
+that explicitly says it was not submitted. V2 event reconnects send
+`Last-Event-ID`, match this invocation's message/shell identity and resume
+output reads from the returned byte cursor. A saved truncated preview must
+never count as complete command output.
 
 In practice that means:
 
@@ -86,8 +84,9 @@ broken, an issue with a reproduction would be welcome.
 
 - Include a test for behavior you change. Write the assertion around *why* it
   matters, not just what the function returns — the transport has several
-  properties (exit codes survive truncation, `cd` stays inside the tee'd
-  subshell, `--json` keeps stdout clean) that are invisible until they break.
+  properties (no duplicated execution after a lost acknowledgement, complete
+  Unicode output across pages, `--json` keeping stdout clean) that are invisible
+  until they break.
 - Keep comments about what the code does now, not what it used to do. Change
   history belongs in commits.
 - Run `pytest`, `ruff check` and `ruff format` before pushing. CI runs all
