@@ -176,7 +176,7 @@ def test_a_network_blip_while_waiting_keeps_waiting(monkeypatch) -> None:
 @pytest.mark.parametrize(
     ("answer", "message"),
     [
-        (_Resp(403, {"detail": "access_denied"}), "suspended or deleted"),
+        (_Resp(403, {"detail": "cli_login_account_refused"}), "suspended or deleted"),
         (_Resp(401, {"detail": "Not authenticated"}), "does not support browser-approved login"),
         (_Resp(503, {"detail": "custom_token_mint_failed"}), "custom_token_mint_failed"),
     ],
@@ -271,7 +271,7 @@ def test_manual_never_opens_a_browser(monkeypatch) -> None:
         "_fetch_auth_config",
         lambda _api: {"mode": "firebase", "app_url": "https://app.example"},
     )
-    _redeem_answers(monkeypatch, _Resp(403, {"detail": "access_denied"}))
+    _redeem_answers(monkeypatch, _Resp(403, {"detail": "cli_login_account_refused"}))
     opened: list = []
     monkeypatch.setattr(auth.webbrowser, "open", lambda url: opened.append(url) or True)
 
