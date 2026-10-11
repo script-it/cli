@@ -1,0 +1,14 @@
+{
+  "name": "script-it",
+  "description": "Script.it for Claude Code. Better automation in a world of agents.",
+  "owner": {
+    "name": "Script.it"
+  },
+  "plugins": [
+    {
+      "name": "scriptit",
+      "source": "./",
+      "description": "Automations your teammates and your AI agents can both run, built from readable steps a human can verify."
+    }
+  ]
+}

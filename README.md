@@ -97,7 +97,19 @@ scriptit start <name-from-that-list>
 **5. Set up your coding agent.**
 
 Install the entry-point skill once, and any agent that reads skills knows how
-to drive your workspace:
+to drive your workspace.
+
+In Claude Code, install it as a plugin — this repository is its marketplace:
+
+```
+/plugin marketplace add script-it/cli
+/plugin install scriptit@script-it
+```
+
+`claude plugin update scriptit@script-it` brings it up to date, or turn on
+auto-update for the `script-it` marketplace under `/plugin`.
+
+Any other host that reads skills from a folder takes the file directly:
 
 ```bash
 mkdir -p ~/.claude/skills/scriptit
@@ -269,8 +281,8 @@ renders that runtime knowledge for agent context.
 ## Use it from a coding agent
 
 One file — [`agent-skills/scriptit/`](agent-skills/scriptit/SKILL.md) — installed
-into the agent host once; [Set up your coding agent](#set-up-your-coding-agent)
-above has the command.
+into the agent host once, as the Claude Code plugin or as a plain skill file;
+[Set up your coding agent](#set-up-your-coding-agent) above has the commands.
 
 The skill carries almost no platform knowledge on purpose. It creates a fresh
 session, then runs `scriptit context` to fetch one complete live bundle of
