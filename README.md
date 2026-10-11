@@ -291,6 +291,32 @@ links, connected integrations, and current skills. The workstation client only
 transports and prints that bundle, so agent behavior is updated with the
 platform instead of being copied into each CLI release.
 
+### What the Claude Code plugin runs and sends
+
+The plugin is two skills. It has no hooks, MCP servers or scripts of its own;
+both skills tell the agent to run the `scriptit` CLI on your machine.
+
+- **`scriptit`** has the agent sign in through your browser, create a session,
+  fetch its instructions, run commands and move files. Every command goes to
+  the Script.it deployment you signed in to and runs in your sandbox there.
+  `scriptit auth browser-url` mints a one-time link, valid for 60 seconds,
+  that opens the app in the agent's browser signed in as you. If the CLI is
+  missing, the agent asks before installing it from this repository with
+  `uv tool install`.
+- **`scriptit-browser-cookies`** runs when you ask for it. It reads cookies
+  for the sites you name from your local Chrome profile, using
+  `browser-cookie3`, which `uv` fetches from PyPI; macOS asks for Keychain
+  access to decrypt them. It writes them to a local file with mode 0600,
+  uploads that file to your sandbox at `~/.browser/storage_state.json`, and
+  deletes the local copy. Only cookies for the sites you name are written to
+  the file.
+
+The CLI itself stores your login at `~/.config/scriptit/credentials.json`
+(mode 0600), checks PyPI at most once a day for a newer release
+(`SCRIPTIT_NO_UPDATE_CHECK=1` turns that off), and sends anonymous usage
+analytics — command names and exit codes, never their arguments — to your own
+deployment (`DO_NOT_TRACK=1` turns that off).
+
 ## Good to know
 
 - **Sessions run one command at a time.** A second command queues rather than
