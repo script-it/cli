@@ -22,10 +22,16 @@ Worth knowing when assessing a finding:
   (default `~/.config/scriptit/credentials.json`), written mode `0600`. The
   file holds a refresh token per profile — never a password. The CLI never
   reads or transmits your password; sign-in happens in your browser.
-- **Login uses a loopback handoff.** `scriptit auth login` listens on
-  `127.0.0.1` on a random port and accepts a token from the signed-in page,
-  matched against a nonce it generated. Self-hosted Keycloak deployments use
-  the RFC 8628 device grant with PKCE (S256) instead.
+- **Login is a browser approval.** `scriptit auth login` keeps a random
+  verifier and shows a link carrying only its SHA-256 digest. The signed-in
+  page approves that digest, and the CLI collects its session by presenting
+  the verifier, which never leaves the process — a link someone else sees
+  signs nobody in. The first approval of a link stands, and the CLI reports
+  which account it signed in as, so a link approved by the wrong account is
+  visible. A link still awaiting approval is kept, mode `0600`, in
+  `$XDG_CONFIG_HOME/scriptit/pending-login.json` so an interrupted login can
+  resume it. Self-hosted Keycloak deployments use the RFC 8628 device grant
+  with PKCE (S256) instead.
 - **Tokens are short-lived.** ID tokens are refreshed lazily and re-persisted;
   `scriptit auth logout` removes the stored credential.
 - **Commands run remotely, not locally.** This client dispatches shell strings

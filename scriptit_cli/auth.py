@@ -1,34 +1,38 @@
 """``scriptit auth`` — connect the workstation CLI to the Script.it platform.
 
-Login is a loopback browser flow (the pattern gcloud/gh use): the CLI starts a
-one-shot listener on ``127.0.0.1:<random port>``, opens the signed-in web app
-at ``/app/cli-auth?port=<port>&state=<nonce>``, and the page delivers a
-backend-minted Firebase custom token straight to the listener. The CLI
-exchanges it for an ID + refresh token pair via the public identitytoolkit
+Login on Script.it Cloud is a browser approval. The CLI keeps a random
+verifier and opens — or, where it cannot, prints —
+``/app/cli-auth?challenge=<sha256(verifier)>``. The signed-in page approves
+that digest, and the CLI polls the backend with the verifier until the
+approval lands, receiving a backend-minted Firebase custom token that it
+exchanges for an ID + refresh token pair via the public identitytoolkit
 endpoint. The stored record is that pair plus what a refresh needs (the API
 key, the deployment's URLs, the expiry) — no password ever touches the CLI, and
 nothing in it is reusable as one.
-``--manual`` covers remote/SSH machines: the page shows a copyable code
-instead.
+
+Only the digest leaves this process, so nothing printed, and nothing a
+transcript carrying the URL holds, can be redeemed by anyone else; and the
+browser never has to reach this machine, so one flow serves a laptop, an SSH
+host and a hosted agent's container alike. Self-hosted deployments sign in
+through their Keycloak realm's device grant instead.
 """
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import json
-import queue
+import hashlib
+import os
 import secrets
 import sys
-import threading
+import time
 import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict, Optional
 
 import requests
 
 from scriptit_cli.analytics import analytics
 from scriptit_cli.client import detect_client
+from scriptit_cli.config import _config_dir
 from scriptit_cli.output import emit, fail, note, warn
 from scriptit_cli.remote_auth import (
     RemoteAuthError,
@@ -43,9 +47,23 @@ from scriptit_cli.remote_auth import (
     save_credentials,
     set_current_profile,
 )
+from scriptit_cli.util import update_json_file
 
 DEFAULT_API_URL = "https://api.script.it"
 LOGIN_TIMEOUT_SECONDS = 300
+
+PENDING_LOGIN_FILE = "pending-login.json"
+
+# How often a waiting CLI asks whether its login was approved. Each poll is one
+# indexed DELETE on the backend, and nobody reading a code off a screen can
+# tell this apart from anything faster.
+_APPROVAL_POLL_SECONDS = 2
+
+# How long a printed approval link stays resumable. A hosted agent's harness
+# may time out the waiting command; running it again inside this window shows
+# the same link and collects an approval already given, rather than asking the
+# user to approve a second one.
+_PENDING_LOGIN_MAX_AGE_SECONDS = 1800
 
 
 def _fetch_auth_config(api_url: str) -> Dict[str, Any]:
@@ -53,89 +71,6 @@ def _fetch_auth_config(api_url: str) -> Dict[str, Any]:
     if resp.status_code != 200:
         raise RemoteAuthError(f"could not reach {api_url}/api/v1/auth/config ({resp.status_code})")
     return resp.json()
-
-
-class _CallbackHandler(BaseHTTPRequestHandler):
-    """One-shot loopback receiver for the browser's payload POST."""
-
-    # Per-connection socket timeout (http.server applies it in setup()):
-    # a client declaring a Content-Length it never sends can only tie up
-    # the listener for this long, not for the whole login window.
-    timeout = 10
-
-    payload_queue: "queue.Queue[Dict[str, Any]]"
-    expected_state: str
-    # The app origin the payload legitimately comes from — CORS is scoped to
-    # it (not `*`) so an arbitrary page can't read responses while probing.
-    allowed_origin: str
-
-    def _cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", self.allowed_origin)
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "content-type")
-        # Chrome's Private Network Access preflights public-site → 127.0.0.1
-        # requests and blocks the POST unless the listener acknowledges it.
-        self.send_header("Access-Control-Allow-Private-Network", "true")
-
-    def do_OPTIONS(self) -> None:
-        self.send_response(204)
-        self._cors()
-        self.end_headers()
-
-    def do_POST(self) -> None:
-        if self.path != "/cli-callback":
-            self.send_response(404)
-            self.end_headers()
-            return
-        # Browsers stamp cross-origin POSTs with an unforgeable-from-JS
-        # Origin — reject other websites outright. Absent Origin (curl,
-        # tests) still passes; the state nonce remains the real gate.
-        origin = self.headers.get("Origin")
-        if origin and origin != self.allowed_origin:
-            self.send_response(403)
-            self.end_headers()
-            return
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-            # A negative length makes `rfile.read` block until the peer goes
-            # away, hanging the login on a malformed request.
-            if length < 0:
-                self.send_response(400)
-                self._cors()
-                self.end_headers()
-                return
-            # The real payload is ~2KB; anything local can POST here while
-            # the listener is up, so cap reads instead of trusting the header.
-            if length > 65536:
-                self.send_response(413)
-                self._cors()
-                self.end_headers()
-                return
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (ValueError, OSError):
-            payload = None
-        if (
-            not isinstance(payload, dict)
-            or payload.get("v") != 1
-            or payload.get("state") != self.expected_state
-            or not payload.get("custom_token")
-            # Every consumer indexes this; missing, it becomes a KeyError
-            # traceback several steps later instead of a rejected payload.
-            or not payload.get("firebase_api_key")
-        ):
-            self.send_response(400)
-            self._cors()
-            self.end_headers()
-            return
-        self.send_response(200)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"ok": true}')
-        self.payload_queue.put(payload)
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass
 
 
 def _should_open_browser(no_browser: bool) -> bool:
@@ -152,36 +87,89 @@ def _should_open_browser(no_browser: bool) -> bool:
     return not no_browser and detect_client() is None
 
 
-def _receive_via_loopback(
-    login_url_base: str,
-    state: str,
-    timeout: int,
-    allowed_origin: str,
-    open_browser: bool = True,
-) -> Dict[str, Any]:
-    payload_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+def _pending_login_path() -> str:
+    return os.path.join(_config_dir(), PENDING_LOGIN_FILE)
 
-    handler = type(
-        "_BoundHandler",
-        (_CallbackHandler,),
-        {
-            "payload_queue": payload_queue,
-            "expected_state": state,
-            "allowed_origin": allowed_origin,
-        },
+
+def _is_resumable(entry: Any, now: float) -> bool:
+    if not isinstance(entry, dict) or not entry.get("verifier"):
+        return False
+    try:
+        return now - float(entry.get("created_at")) < _PENDING_LOGIN_MAX_AGE_SECONDS
+    except (TypeError, ValueError):
+        return False
+
+
+def _take_verifier(key: str) -> str:
+    """This login's pending verifier if it is still resumable, else a new one.
+
+    Kept beside the credential store, 0600, until the approval is collected or
+    refused. It is a secret for as long as it lives: whoever holds it collects
+    any approval of its challenge.
+    """
+    now = time.time()
+    taken: Dict[str, str] = {}
+
+    def _mutate(data: Dict[str, Any]) -> Dict[str, Any]:
+        live = {k: v for k, v in data.items() if _is_resumable(v, now)}
+        if key in live:
+            taken["verifier"] = str(live[key]["verifier"])
+        else:
+            taken["verifier"] = secrets.token_urlsafe(32)
+            live[key] = {"verifier": taken["verifier"], "created_at": now}
+        return live
+
+    update_json_file(_pending_login_path(), _mutate)
+    return taken["verifier"]
+
+
+def _forget_verifier(key: str) -> None:
+    update_json_file(
+        _pending_login_path(), lambda data: {k: v for k, v in data.items() if k != key}
     )
-    server = HTTPServer(("127.0.0.1", 0), handler)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
 
-    url = f"{login_url_base}?port={port}&state={state}"
-    # flush: agents and scripts read this through pipes, where Python
-    # block-buffers stdout — the URL must be visible before we block.
+
+def _response_detail(resp: requests.Response) -> str:
+    with contextlib.suppress(ValueError, KeyError, TypeError):
+        return str(resp.json()["detail"])
+    return resp.text[:300]
+
+
+def _approval_refused(status: int, detail: str) -> RemoteAuthError:
+    if status in (401, 404, 405):
+        # A backend without the redeem route answers the unauthenticated poll
+        # from its auth middleware, before routing.
+        return RemoteAuthError(
+            "this Script.it deployment does not support browser-approved login — "
+            "sign in to it with an earlier scriptit-cli release"
+        )
+    if status == 403:
+        return RemoteAuthError("the approving account is suspended or deleted")
+    return RemoteAuthError(f"login approval failed ({status}): {detail}")
+
+
+def _receive_via_approval(
+    api_url: str,
+    login_url_base: str,
+    pending_key: str,
+    timeout: int,
+    open_browser: bool = False,
+) -> Dict[str, Any]:
+    """Show an approval link, then poll until a signed-in browser approves it.
+
+    Only ``sha256(verifier)`` leaves this process. The verifier is forgotten
+    once the backend answers for it either way — collected, or refused — and
+    kept on a timeout, so running the command again resumes the same link.
+    """
+    verifier = _take_verifier(pending_key)
+    challenge = hashlib.sha256(verifier.encode("utf-8")).hexdigest()
+    url = f"{login_url_base}?challenge={challenge}"
+    # `note` flushes: agents and scripts read this through pipes, and the URL
+    # must be visible before the wait begins.
     if open_browser:
-        note("Opening your browser to complete login…")
+        note("Opening your browser to approve this login…")
         note(f"  {url}")
-        note("(If the browser doesn't open, paste the URL yourself.)")
+        note("(If the browser doesn't open, open the URL yourself.)")
         # A headless or misconfigured machine simply doesn't open one; the URL
         # is already printed above, which is the fallback.
         with contextlib.suppress(Exception):
@@ -189,42 +177,48 @@ def _receive_via_loopback(
     else:
         note("Open this URL in a browser where you're signed in to Script.it:")
         note(f"  {url}")
+    note(f"Approve it if the page shows the code {challenge[:4].upper()}-{challenge[4:8].upper()}.")
+    note("If this command is interrupted, run it again: it resumes this same login.")
 
-    try:
-        return payload_queue.get(timeout=timeout)
-    except queue.Empty:
-        raise RemoteAuthError(
-            f"login timed out after {timeout}s — retry, or use `scriptit auth login --manual`"
-        ) from None
-    finally:
-        server.shutdown()
-        server.server_close()
+    deadline = time.monotonic() + timeout
+    last_error: Optional[requests.RequestException] = None
+    while True:
+        try:
+            resp = requests.post(
+                f"{api_url}/api/v1/auth/cli/redeem",
+                json={"verifier": verifier},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            # A blip while waiting is not a failed login: an approval already
+            # given is still there for the next poll.
+            last_error = exc
+        else:
+            last_error = None
+            detail = _response_detail(resp)
+            if resp.status_code == 200:
+                _forget_verifier(pending_key)
+                with contextlib.suppress(ValueError):
+                    body = resp.json()
+                    if (
+                        isinstance(body, dict)
+                        and body.get("custom_token")
+                        and body.get("firebase_api_key")
+                    ):
+                        return body
+                raise RemoteAuthError("login approval returned an unexpected response")
+            if not (resp.status_code == 400 and detail == "authorization_pending"):
+                _forget_verifier(pending_key)
+                raise _approval_refused(resp.status_code, detail)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_APPROVAL_POLL_SECONDS)
 
-
-def _receive_via_manual(login_url_base: str, state: str) -> Dict[str, Any]:
-    url = f"{login_url_base}?state={state}"
-    note("Open this URL in a browser where you're signed in to Script.it:")
-    note(f"  {url}")
-    # The prompt goes through `note` rather than `input`'s own argument: that
-    # one always writes to stdout, which under --json is reserved for the
-    # result document.
-    note("Paste the code shown on that page: ")
-    code = input().strip()
-    try:
-        payload = json.loads(base64.b64decode(code).decode("utf-8"))
-    except (ValueError, OSError):
-        raise RemoteAuthError("that code couldn't be decoded — copy it exactly") from None
-    if not isinstance(payload, dict):
-        raise RemoteAuthError("that code didn't contain a login payload")
-    if (
-        payload.get("v") != 1
-        or not payload.get("custom_token")
-        or not payload.get("firebase_api_key")
-    ):
-        raise RemoteAuthError("unrecognized code payload")
-    if payload.get("state") != state:
-        raise RemoteAuthError("code was minted for a different login attempt — retry")
-    return payload
+    reason = f" (last error: {last_error})" if last_error else ""
+    raise RemoteAuthError(
+        f"not approved within {timeout}s{reason} — run the same command again to keep "
+        "waiting on this link"
+    )
 
 
 def _verify_stored_login(api_url: str, creds: Dict[str, Any], profile: Optional[str]) -> None:
@@ -286,9 +280,10 @@ class AuthCommands:
                 https://api.script.it). Pass a self-hosted deployment's
                 origin to sign in to that instead.
             app_url: Frontend origin override (normally discovered from the API).
-            manual: Print the login URL and accept a pasted code instead of
-                listening on localhost (for SSH / remote machines).
-            timeout: Seconds to wait for the browser handoff.
+            manual: The same as --no-browser; kept so instructions that
+                pass it keep working.
+            timeout: Seconds to wait for the approval. Run again after a
+                timeout or an interruption, the command resumes the same link.
             profile: Named profile to store this login under (multiple
                 accounts side by side; switch with `scriptit auth use`,
                 override per-invocation with SCRIPTIT_PROFILE).
@@ -313,19 +308,14 @@ class AuthCommands:
         if not app_url:
             fail("the API did not advertise an app URL; pass --app-url")
 
-        state = secrets.token_urlsafe(24)
-        login_url_base = f"{app_url}/app/cli-auth"
         try:
-            if manual:
-                payload = _receive_via_manual(login_url_base, state)
-            else:
-                payload = _receive_via_loopback(
-                    login_url_base,
-                    state,
-                    timeout,
-                    allowed_origin=app_url,
-                    open_browser=_should_open_browser(no_browser),
-                )
+            payload = _receive_via_approval(
+                api_url,
+                f"{app_url}/app/cli-auth",
+                pending_key=f"{current_profile_name(profile)} {api_url}",
+                timeout=timeout,
+                open_browser=_should_open_browser(no_browser or manual),
+            )
             tokens = exchange_custom_token(
                 str(payload["firebase_api_key"]),
                 str(payload["custom_token"]),

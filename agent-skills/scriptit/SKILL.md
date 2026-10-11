@@ -22,7 +22,11 @@ against the user's actual account.
 
 ## Bootstrap (start of every task)
 1. `scriptit auth status` — confirm the machine is connected. If it is not,
-   run `scriptit auth login` and ask the user to approve the URL it prints.
+   run `scriptit auth login` and ask the user to approve the URL it prints,
+   checking the page shows the same code. It works whether or not this
+   machine is the user's own. If the command times out before they approve,
+   run it again: it resumes the same link. Never ask the user to paste a code
+   or token into the conversation.
 
 2. `scriptit session new` — create the session this task runs in.
 
@@ -44,8 +48,8 @@ machine. Every other Script.it verb is forwarded to the CLI in the sandbox.
 
 ### Authentication
 
-- `scriptit auth login` — connect this machine to Script.it through a browser.
-  Use `--manual` when a loopback browser handoff is unavailable, `--profile
+- `scriptit auth login` — connect this machine to Script.it: the user approves
+  the link it prints in any browser where they're signed in. Use `--profile
   <name>` to store another account, and `--api-url <url>` for another
   deployment.
 - `scriptit auth status` — verify the selected profile and show its account and
