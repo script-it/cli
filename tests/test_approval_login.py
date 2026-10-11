@@ -178,7 +178,6 @@ def test_a_network_blip_while_waiting_keeps_waiting(monkeypatch) -> None:
     [
         (_Resp(403, {"detail": "cli_login_account_refused"}), "suspended or deleted"),
         (_Resp(401, {"detail": "Not authenticated"}), "does not support browser-approved login"),
-        (_Resp(503, {"detail": "custom_token_mint_failed"}), "custom_token_mint_failed"),
     ],
 )
 def test_a_refusal_ends_the_link(monkeypatch, answer, message) -> None:
@@ -187,6 +186,35 @@ def test_a_refusal_ends_the_link(monkeypatch, answer, message) -> None:
     with pytest.raises(RemoteAuthError, match=message):
         auth._receive_via_approval(API, LOGIN, KEY, timeout=30)
     assert KEY not in _pending_store()
+
+
+def test_a_server_error_while_waiting_keeps_waiting(monkeypatch, capsys) -> None:
+    """A deploy rolling or a failed mint answers 5xx and leaves the approval
+    in place; the next poll collects it."""
+    _redeem_answers(
+        monkeypatch,
+        _Resp(503, {"detail": "custom_token_mint_failed"}),
+        _Resp(502, {"detail": "Bad Gateway"}),
+        APPROVED,
+    )
+
+    payload = auth._receive_via_approval(API, LOGIN, KEY, timeout=30)
+
+    assert payload["custom_token"] == "CT"
+    shown = _printed(capsys)
+    assert "503 custom_token_mint_failed" in shown
+    assert "502 Bad Gateway" in shown
+
+
+def test_a_server_error_that_outlasts_the_wait_keeps_the_link(monkeypatch) -> None:
+    first = _redeem_answers(monkeypatch, _Resp(503, {"detail": "custom_token_mint_failed"}))
+    with pytest.raises(RemoteAuthError, match="503 custom_token_mint_failed"):
+        auth._receive_via_approval(API, LOGIN, KEY, timeout=0)
+
+    second = _redeem_answers(monkeypatch, APPROVED)
+    auth._receive_via_approval(API, LOGIN, KEY, timeout=30)
+
+    assert second[0] == first[0]
 
 
 def test_manual_login_stores_the_approved_session(monkeypatch, capsys) -> None:

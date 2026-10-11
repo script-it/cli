@@ -181,8 +181,14 @@ def _receive_via_approval(
     note("If this command is interrupted, run it again: it resumes this same login.")
 
     deadline = time.monotonic() + timeout
-    last_error: Optional[requests.RequestException] = None
+    # Failures that leave a given approval where it is: the connection
+    # dropping, and the server answering 5xx or 429 (a deploy rolling, a cold
+    # start, a failed mint, which the backend runs before spending the
+    # approval). The wait rides them out, saying once per new failure why it
+    # is still waiting.
+    last_error: Optional[str] = None
     while True:
+        error: Optional[str] = None
         try:
             resp = requests.post(
                 f"{api_url}/api/v1/auth/cli/redeem",
@@ -190,11 +196,8 @@ def _receive_via_approval(
                 timeout=30,
             )
         except requests.RequestException as exc:
-            # A blip while waiting is not a failed login: an approval already
-            # given is still there for the next poll.
-            last_error = exc
+            error = str(exc)
         else:
-            last_error = None
             detail = _response_detail(resp)
             if resp.status_code == 200:
                 _forget_verifier(pending_key)
@@ -207,9 +210,14 @@ def _receive_via_approval(
                     ):
                         return body
                 raise RemoteAuthError("login approval returned an unexpected response")
-            if not (resp.status_code == 400 and detail == "authorization_pending"):
+            if resp.status_code == 429 or resp.status_code >= 500:
+                error = f"{resp.status_code} {detail}"
+            elif not (resp.status_code == 400 and detail == "authorization_pending"):
                 _forget_verifier(pending_key)
                 raise _approval_refused(resp.status_code, detail)
+        if error and error != last_error:
+            note(f"Still waiting — Script.it could not answer ({error}); retrying.")
+        last_error = error
         if time.monotonic() >= deadline:
             break
         time.sleep(_APPROVAL_POLL_SECONDS)
