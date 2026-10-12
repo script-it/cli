@@ -14,5 +14,5 @@
   "termsOfServiceUrl": "https://script.it/tos",
   "license": "Apache-2.0",
   "keywords": ["automation", "workflows", "agent-skills", "triggers", "integrations", "script.it"],
-  "skills": ["./scriptit/", "./scriptit-browser-cookies/"]
+  "skills": ["./scriptit/"]
 }
