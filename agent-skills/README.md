@@ -55,12 +55,12 @@ itself has no MCP servers, hooks or scripts.
   analytics — command names and exit codes, never their arguments — to your
   own deployment (`DO_NOT_TRACK=1` turns it off).
 
-## Also in this folder
+## Not in the plugin
 
-**[scriptit-browser-cookies](scriptit-browser-cookies/SKILL.md)** is not part
-of the plugin. When you ask it to, it reads your local Chrome cookies for the
-sites you name and uploads them to your Script.it environment, so browser
-automations there run as you. To use it, copy its folder into your agent's
-skills directory.
+**[scriptit-browser-cookies](../extra-skills/scriptit-browser-cookies/SKILL.md)**
+lives outside this folder and is not part of the plugin. When you ask it to,
+it reads your local Chrome cookies for the sites you name and uploads them to
+your Script.it environment, so browser automations there run as you. To use
+it, copy its folder into your agent's skills directory.
 
 The [CLI README](../README.md) covers everything else.

@@ -17,11 +17,6 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_MANIFEST = ROOT / "agent-skills" / ".claude-plugin" / "plugin.json"
 MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
 
-# Skills in agent-skills/ that ship only as folders to copy, outside the plugin.
-# The browser-cookies skill sends login cookies off the machine, which the
-# directory listing's attestation rules out.
-COPY_ONLY_SKILLS = {"scriptit-browser-cookies"}
-
 
 def test_plugin_version_matches_package_version():
     manifest = json.loads(PLUGIN_MANIFEST.read_text())
@@ -30,13 +25,13 @@ def test_plugin_version_matches_package_version():
     )
 
 
-def test_plugin_lists_every_skill_folder_except_copy_only_ones():
+def test_plugin_lists_every_skill_folder():
     # Codex reads only the listed folders when `skills` names them, and skips a
     # `"./"` pointing at the plugin root, so each skill is listed by name.
     manifest = json.loads(PLUGIN_MANIFEST.read_text())
     listed = {Path(entry).name for entry in manifest["skills"]}
     on_disk = {p.parent.name for p in (ROOT / "agent-skills").glob("*/SKILL.md")}
-    assert listed == on_disk - COPY_ONLY_SKILLS
+    assert listed == on_disk
 
 
 def test_marketplace_entry_leaves_version_to_the_manifest():
