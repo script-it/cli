@@ -8,6 +8,10 @@
   },
   "homepage": "https://script.it",
   "repository": "https://github.com/script-it/cli",
+  "documentationUrl": "https://docs.script.it",
+  "supportUrl": "mailto:support@script.it",
+  "privacyPolicyUrl": "https://script.it/privacy",
+  "termsOfServiceUrl": "https://script.it/tos",
   "license": "Apache-2.0",
   "keywords": ["automation", "workflows", "agent-skills", "triggers", "integrations", "script.it"],
   "skills": ["./scriptit/", "./scriptit-browser-cookies/"]
