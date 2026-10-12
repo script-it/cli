@@ -109,6 +109,13 @@ In Claude Code, install it as a plugin — this repository is its marketplace:
 `claude plugin update scriptit@script-it` brings it up to date, or turn on
 auto-update for the `script-it` marketplace under `/plugin`.
 
+Codex installs the same plugin from the same marketplace:
+
+```bash
+codex plugin marketplace add script-it/cli
+codex plugin add scriptit@script-it
+```
+
 Any other host that reads skills from a folder takes the file directly:
 
 ```bash
@@ -117,7 +124,7 @@ curl -sSL https://raw.githubusercontent.com/script-it/cli/main/agent-skills/scri
   -o ~/.claude/skills/scriptit/SKILL.md
 ```
 
-For Codex-style hosts, paste that file into `AGENTS.md` instead.
+A host that reads only an `AGENTS.md` takes the file's contents pasted there.
 [Use it from a coding agent](#use-it-from-a-coding-agent) explains what the
 skill does and why it stays this small.
 
@@ -281,7 +288,8 @@ renders that runtime knowledge for agent context.
 ## Use it from a coding agent
 
 One file — [`agent-skills/scriptit/`](agent-skills/scriptit/SKILL.md) — installed
-into the agent host once, as the Claude Code plugin or as a plain skill file;
+into the agent host once, as the Claude Code or Codex plugin or as a plain
+skill file;
 [Set up your coding agent](#set-up-your-coding-agent) above has the commands.
 
 The skill carries almost no platform knowledge on purpose. It creates a fresh
