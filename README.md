@@ -215,7 +215,11 @@ Move files both ways:
 scriptit exec -- ls /workspaces/<workspace-id>
 scriptit fs push ./report.csv /workspaces/<workspace-id>/assets/report.csv
 scriptit fs pull /workspaces/<workspace-id>/logs/run.log .
+scriptit fs read data_files/report/output.html
 ```
+
+A relative remote path starts where `exec` runs, in the session's directory,
+so a path that works in `exec` names the same file in `fs`.
 
 ### Sessions
 

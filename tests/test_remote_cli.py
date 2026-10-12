@@ -489,39 +489,98 @@ def test_context_command_requires_an_explicit_current_session(monkeypatch, capsy
     assert "scriptit session new" in capsys.readouterr().err
 
 
+SESSION_DIR = "/workspaces/user_u1/.sessions/ses_42"
+
+
+def _client_for_fs_paths(monkeypatch, session_id="ses_42"):
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client._cached_user_id = "u1"
+    monkeypatch.setattr(
+        remote.RemoteClient,
+        "anchor",
+        lambda self: (session_id, "sbx_1", "state" if session_id else "none"),
+    )
+    return client
+
+
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
+        ("data_files/weather/output.html", f"{SESSION_DIR}/data_files/weather/output.html"),
+        ("./scriptit/run.log", f"{SESSION_DIR}/scriptit/run.log"),
+        ("data_files/../scriptit/run.log", f"{SESSION_DIR}/scriptit/run.log"),
+        ("../ses_7/data_files/a.txt", "/workspaces/user_u1/.sessions/ses_7/data_files/a.txt"),
         ("workspaces/ws/team/script", "/workspaces/ws/team/script"),
+        ("./workspaces/ws/SKILL.md", "/workspaces/ws/SKILL.md"),
         ("/workspaces/ws/team/script", "/workspaces/ws/team/script"),
     ],
 )
-def test_fs_paths_are_canonicalized_before_transport(path: str, expected: str) -> None:
-    from scriptit_cli import commands
+def test_fs_paths_resolve_where_exec_runs(monkeypatch, path: str, expected: str) -> None:
+    """`exec` runs in the session's directory and the context tells agents to
+    use relative paths there, so a relative `fs` path names the same file. The
+    session's workspaces/ is the canonical tree mounted in place, and the file
+    API takes only the canonical form."""
+    client = _client_for_fs_paths(monkeypatch)
 
-    assert commands._canonical_fs_path(path) == expected
+    assert client.resolve_fs_path(path) == expected
 
 
-def test_fs_push_sends_and_reports_the_canonical_remote_path(monkeypatch, capsys) -> None:
+def test_workspace_paths_need_no_session(monkeypatch) -> None:
+    client = _client_for_fs_paths(monkeypatch, session_id=None)
+    client._cached_user_id = None
+    monkeypatch.setattr(
+        remote.RemoteClient, "request", lambda *a, **k: pytest.fail("no lookup needed")
+    )
+
+    assert client.resolve_fs_path("workspaces/ws/a.md") == "/workspaces/ws/a.md"
+
+
+def test_session_relative_path_without_a_session_says_how_to_get_one(monkeypatch) -> None:
+    client = _client_for_fs_paths(monkeypatch, session_id=None)
+
+    with pytest.raises(remote.RemoteError, match="scriptit session new"):
+        client.resolve_fs_path("data_files/a.txt")
+
+
+def test_fs_paths_follow_the_session_named_for_the_invocation(monkeypatch) -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client.profile, client.api_url = "default", "http://x"
+    client.state_key = "default:http://x"
+    client._cached_user_id = "u1"
+    remote.update_state(client.state_key, session_id="ses_sticky", sandbox_id="sb")
+    monkeypatch.setenv(remote.ENV_SESSION, "ses_task")
+
+    assert client.resolve_fs_path("data_files/a.txt") == (
+        "/workspaces/user_u1/.sessions/ses_task/data_files/a.txt"
+    )
+
+
+@pytest.mark.parametrize(
+    ("remote_path", "sent"),
+    [
+        ("workspaces/ws/report.csv", "/workspaces/ws/report.csv"),
+        ("data_files/report.csv", f"{SESSION_DIR}/data_files/report.csv"),
+    ],
+)
+def test_fs_push_sends_and_reports_the_resolved_remote_path(
+    monkeypatch, capsys, remote_path: str, sent: str
+) -> None:
     from scriptit_cli import commands
 
     calls: list[tuple[str, str, str]] = []
+    client = _client_for_fs_paths(monkeypatch)
+    monkeypatch.setattr(remote.RemoteClient, "ensure_sandbox", lambda self: "sbx_1")
+    monkeypatch.setattr(
+        remote.RemoteClient,
+        "fs_upload",
+        lambda self, sandbox_id, path, local: calls.append((sandbox_id, path, local)),
+    )
+    monkeypatch.setattr(commands, "_client_or_exit", lambda: client)
 
-    class _FsClient:
-        @staticmethod
-        def ensure_sandbox() -> str:
-            return "sbx_1"
+    commands.FsCommands().push("report.csv", remote_path)
 
-        @staticmethod
-        def fs_upload(sandbox_id: str, remote: str, local: str) -> None:
-            calls.append((sandbox_id, remote, local))
-
-    monkeypatch.setattr(commands, "_client_or_exit", _FsClient)
-
-    commands.FsCommands().push("report.csv", "workspaces/ws/report.csv")
-
-    assert calls == [("sbx_1", "/workspaces/ws/report.csv", "report.csv")]
-    assert capsys.readouterr().out == ("Pushed report.csv -> /workspaces/ws/report.csv\n")
+    assert calls == [("sbx_1", sent, "report.csv")]
+    assert capsys.readouterr().out == f"Pushed report.csv -> {sent}\n"
 
 
 @pytest.mark.parametrize(

@@ -506,10 +506,10 @@ class RemoteClient:
             )
 
     def _own_user_id(self) -> str:
-        """The caller's backend user id, cached — needed to build the
-        ``/workspaces/user_<id>/.sessions/...`` path for truncation recovery.
-        The id is not derivable from the bearer token client-side, and
-        Keycloak-mode tokens carry no matching claim."""
+        """The caller's backend user id, cached — needed to build a session's
+        ``/workspaces/user_<id>/.sessions/<sid>`` directory path. The id is
+        not derivable from the bearer token client-side, and Keycloak-mode
+        tokens carry no matching claim."""
         cached = self._cached_user_id
         if cached:
             return cached
@@ -1052,8 +1052,7 @@ class RemoteClient:
         truncated = exit_code is None and len(raw) >= self._SSE_TEXT_CAP - 100
         if truncated:
             try:
-                uid = self._own_user_id()
-                full_path = f"/workspaces/user_{uid}/.sessions/{events.session_id}/{self._LOG_PATH}"
+                full_path = f"{self.session_dir(events.session_id)}/{self._LOG_PATH}"
                 recovered_raw = self.fs_read(events.sandbox_id, full_path).decode(
                     "utf-8", errors="replace"
                 )
@@ -1076,6 +1075,33 @@ class RemoteClient:
         return output, exit_code
 
     # -- files -------------------------------------------------------------
+
+    def session_dir(self, session_id: str) -> str:
+        """A session's working directory as the file API addresses it."""
+        return f"/workspaces/user_{self._own_user_id()}/.sessions/{session_id}"
+
+    def resolve_fs_path(self, path: str) -> str:
+        """The absolute path the file API takes for an ``fs`` path.
+
+        A relative path starts at the anchor session's directory, the cwd
+        ``exec`` runs in, so a path that works in ``exec`` names the same
+        file here. The session's ``workspaces/<id>`` is the canonical
+        ``/workspaces/<id>`` tree mounted in place, and the file API takes
+        only the canonical form, so those paths resolve to it without a
+        session.
+        """
+        if path.startswith("/"):
+            return path
+        relative = posixpath.normpath(path)
+        if relative == "workspaces" or relative.startswith("workspaces/"):
+            return f"/{relative}"
+        session_id, _, _ = self.anchor()
+        if not session_id:
+            raise RemoteError(
+                f"no current session to resolve {path!r} against; run "
+                "`scriptit session new` first, or give an absolute path"
+            )
+        return posixpath.normpath(posixpath.join(self.session_dir(session_id), relative))
 
     def fs_read(self, sandbox_id: str, path: str) -> bytes:
         """Read a sandbox file's bytes (base64 over the wire, decoded here)."""
