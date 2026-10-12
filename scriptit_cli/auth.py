@@ -39,6 +39,7 @@ from scriptit_cli.remote_auth import (
     credentials_path,
     current_profile_name,
     delete_credentials,
+    ended_session_message,
     exchange_custom_token,
     get_fresh_id_token,
     keycloak_device_login,
@@ -432,6 +433,9 @@ class AuthCommands:
         except requests.RequestException as exc:
             fail(f"could not reach {api_url}: {exc}")
 
+        ended = ended_session_message(resp)
+        if ended is not None:
+            fail(ended)
         if resp.status_code != 200:
             # 409 is the deployment saying it cannot do this at all (Keycloak).
             # Its wording is the useful part, so it is passed through rather
@@ -511,7 +515,12 @@ class AuthCommands:
             )
             return
         if resp.status_code != 200:
-            fail(f"logged in to {api_url}, but /auth/me returned {resp.status_code}")
+            ended = ended_session_message(resp)
+            fail(
+                f"logged in to {api_url}, but {ended}"
+                if ended
+                else f"logged in to {api_url}, but /auth/me returned {resp.status_code}"
+            )
             return
         me = resp.json()
         profile_name = current_profile_name(profile)
