@@ -32,6 +32,8 @@ Then add the skills to your agent:
 
 - **Claude Code:** `/plugin marketplace add script-it/cli`, then
   `/plugin install scriptit@script-it`.
+- **Codex:** `codex plugin marketplace add script-it/cli`, then
+  `codex plugin add scriptit@script-it`.
 - **Any other host:** copy a skill folder, such as `scriptit/`, into the
   host's skills directory (for example `~/.claude/skills/` or
   `.agents/skills/`).
