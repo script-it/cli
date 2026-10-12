@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "scriptit",
-      "source": "./",
+      "source": "./agent-skills",
       "description": "Automations your teammates and your AI agents can both run, built from readable steps a human can verify."
     }
   ]

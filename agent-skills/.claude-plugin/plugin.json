@@ -10,5 +10,5 @@
   "repository": "https://github.com/script-it/cli",
   "license": "Apache-2.0",
   "keywords": ["automation", "workflows", "agent-skills", "triggers", "integrations", "script.it"],
-  "skills": "./agent-skills/"
+  "skills": ["./scriptit/", "./scriptit-browser-cookies/"]
 }
