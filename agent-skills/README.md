@@ -38,4 +38,30 @@ Then add the skills to your agent:
   host's skills directory (for example `~/.claude/skills/` or
   `.agents/skills/`).
 
+## What it sends, and where
+
+The skills have the agent run the `scriptit` CLI on your machine. The plugin
+itself has no MCP servers, hooks or scripts.
+
+- **Your Script.it deployment** (`api.script.it`, or the one you signed in to
+  with `--api-url`) receives every command the agent runs, the files it moves
+  with `scriptit fs`, and, only when you ask the cookie skill for it, the
+  cookies for the sites you name. Commands run in your Script.it environment,
+  and each one is recorded in a session you can see in the app.
+- **Signing in** to Script.it cloud goes through your browser and exchanges tokens
+  with Google's Firebase Authentication (`identitytoolkit.googleapis.com`,
+  `securetoken.googleapis.com`); a self-hosted deployment uses its own
+  Keycloak instead. The CLI keeps the resulting login at
+  `~/.config/scriptit/credentials.json` (mode 0600).
+  `scriptit auth browser-url` mints a one-time link, valid for 60 seconds,
+  that opens the app signed in as you.
+- **The cookie skill** reads your local Chrome cookie store (macOS asks for
+  Keychain access) with `browser-cookie3`, which `uv` fetches from PyPI.
+  Only the named sites' cookies are written to the file it uploads, and the
+  local copy is deleted afterwards.
+- **The CLI** checks PyPI at most once a day for a newer release
+  (`SCRIPTIT_NO_UPDATE_CHECK=1` turns it off), and sends anonymous usage
+  analytics — command names and exit codes, never their arguments — to your
+  own deployment (`DO_NOT_TRACK=1` turns it off).
+
 The [CLI README](../README.md) covers everything else.
