@@ -60,6 +60,12 @@ PENDING_LOGIN_FILE = "pending-login.json"
 # tell this apart from anything faster.
 _APPROVAL_POLL_SECONDS = 2
 
+# The longest one poll may take, and the least it is given: a poll gets only
+# what is left of the wait, so one that stalls cannot hold the command past
+# its timeout, and the floor still lets a zero timeout check once.
+_REDEEM_TIMEOUT_SECONDS = 30
+_REDEEM_MIN_TIMEOUT_SECONDS = 1
+
 # How long a printed approval link stays resumable. A hosted agent's harness
 # may time out the waiting command; running it again inside this window shows
 # the same link and collects an approval already given, rather than asking the
@@ -190,11 +196,12 @@ def _receive_via_approval(
     last_error: Optional[str] = None
     while True:
         error: Optional[str] = None
+        remaining = deadline - time.monotonic()
         try:
             resp = requests.post(
                 f"{api_url}/api/v1/auth/cli/redeem",
                 json={"verifier": verifier},
-                timeout=30,
+                timeout=min(_REDEEM_TIMEOUT_SECONDS, max(remaining, _REDEEM_MIN_TIMEOUT_SECONDS)),
             )
         except requests.RequestException as exc:
             error = str(exc)
@@ -219,9 +226,10 @@ def _receive_via_approval(
         if error and error != last_error:
             note(f"Still waiting — Script.it could not answer ({error}); retrying.")
         last_error = error
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             break
-        time.sleep(_APPROVAL_POLL_SECONDS)
+        time.sleep(min(_APPROVAL_POLL_SECONDS, remaining))
 
     reason = f" (last error: {last_error})" if last_error else ""
     raise RemoteAuthError(
