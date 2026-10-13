@@ -206,6 +206,27 @@ def test_a_server_error_while_waiting_keeps_waiting(monkeypatch, capsys) -> None
     assert "502 Bad Gateway" in shown
 
 
+def test_a_stalled_poll_ends_with_the_wait(monkeypatch) -> None:
+    """A poll gets only what is left of the wait, so a redeem that never
+    answers cannot hold `--timeout 5` for a poll's full 30 seconds."""
+    clock = [0.0]
+    asked: list = []
+
+    def stalled_post(url, json=None, timeout=None, **_kw):
+        asked.append(timeout)
+        clock[0] += timeout
+        raise requests.Timeout("read timed out")
+
+    monkeypatch.setattr(auth.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(auth.requests, "post", stalled_post)
+
+    with pytest.raises(RemoteAuthError, match="not approved within 5s"):
+        auth._receive_via_approval(API, LOGIN, KEY, timeout=5)
+
+    assert asked == [5]
+    assert clock[0] == 5
+
+
 def test_a_server_error_that_outlasts_the_wait_keeps_the_link(monkeypatch) -> None:
     first = _redeem_answers(monkeypatch, _Resp(503, {"detail": "custom_token_mint_failed"}))
     with pytest.raises(RemoteAuthError, match="503 custom_token_mint_failed"):
