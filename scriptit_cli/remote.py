@@ -1080,8 +1080,8 @@ class RemoteClient:
         """A session's working directory as the file API addresses it."""
         return f"/workspaces/user_{self._own_user_id()}/.sessions/{session_id}"
 
-    def resolve_fs_path(self, path: str) -> str:
-        """The absolute path the file API takes for an ``fs`` path.
+    def resolve_fs_path(self, sandbox_id: str, path: str) -> str:
+        """The absolute path the file API takes for an ``fs`` path in ``sandbox_id``.
 
         A relative path starts at the anchor session's directory, the cwd
         ``exec`` runs in, so a path that works in ``exec`` names the same
@@ -1089,16 +1089,30 @@ class RemoteClient:
         ``/workspaces/<id>`` tree mounted in place, and the file API takes
         only the canonical form, so those paths resolve to it without a
         session.
+
+        The anchor must still exist in this sandbox. ``exec`` replaces one
+        that is gone with a new session; a file command does not start one,
+        so it stops here rather than reach into a session ``exec`` will no
+        longer run in.
         """
         if path.startswith("/"):
             return path
         relative = posixpath.normpath(path)
         if relative == "workspaces" or relative.startswith("workspaces/"):
             return f"/{relative}"
-        session_id, _, _ = self.anchor()
+        session_id, _, source = self.anchor()
         if not session_id:
             raise RemoteError(
                 f"no current session to resolve {path!r} against; run "
+                "`scriptit session new` first, or give an absolute path"
+            )
+        if not self.session_exists(sandbox_id, session_id):
+            if source == "env":
+                raise RemoteError(
+                    f"session {session_id} (from {ENV_SESSION}) not found in sandbox {sandbox_id}"
+                )
+            raise RemoteError(
+                f"the current session {session_id} no longer exists; run "
                 "`scriptit session new` first, or give an absolute path"
             )
         return posixpath.normpath(posixpath.join(self.session_dir(session_id), relative))

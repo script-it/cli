@@ -82,7 +82,7 @@ class FsCommands:
         """Print a sandbox file to stdout (bytes pass through unmodified)."""
         client = _client_or_exit()
         sandbox_id = _run(client.ensure_sandbox)
-        path = _run(client.resolve_fs_path, path)
+        path = _run(client.resolve_fs_path, sandbox_id, path)
         data: bytes = _run(client.fs_read, sandbox_id, path)
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
@@ -91,7 +91,7 @@ class FsCommands:
         """Write text content to a sandbox file (creates parent dirs)."""
         client = _client_or_exit()
         sandbox_id = _run(client.ensure_sandbox)
-        path = _run(client.resolve_fs_path, path)
+        path = _run(client.resolve_fs_path, sandbox_id, path)
         _run(client.fs_write, sandbox_id, path, content)
         emit(
             {"path": path, "bytes": len(content.encode("utf-8"))},
@@ -102,7 +102,7 @@ class FsCommands:
         """Upload a local file into the sandbox (binary-safe, ≤30MB)."""
         client = _client_or_exit()
         sandbox_id = _run(client.ensure_sandbox)
-        remote = _run(client.resolve_fs_path, remote)
+        remote = _run(client.resolve_fs_path, sandbox_id, remote)
         _run(client.fs_upload, sandbox_id, remote, local)
         emit(
             {"local": local, "remote": remote},
@@ -117,7 +117,7 @@ class FsCommands:
         """
         client = _client_or_exit()
         sandbox_id = _run(client.ensure_sandbox)
-        remote = _run(client.resolve_fs_path, remote)
+        remote = _run(client.resolve_fs_path, sandbox_id, remote)
         data: bytes = _run(client.fs_read, sandbox_id, remote)
         # A trailing slash names a directory even before it exists.
         if os.path.isdir(local) or local.endswith(("/", os.sep)):
