@@ -1,12 +1,8 @@
 # <img src="assets/logo.png" alt="" height="30" align="top"> Script.it
 
-<!-- PyPI badges are held back until the package is published; shields.io
-     renders "package or version not found" for an unpublished name.
 [![PyPI](https://img.shields.io/pypi/v/scriptit-cli.svg)](https://pypi.org/project/scriptit-cli/)
 [![Python](https://img.shields.io/pypi/pyversions/scriptit-cli.svg)](https://pypi.org/project/scriptit-cli/)
--->
 [![CI](https://github.com/script-it/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/script-it/cli/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 <img src="assets/squiggle.png" alt="" width="100%">
@@ -38,23 +34,27 @@ at [script.it](https://script.it), or point the CLI at a self-hosted deployment
 with `--api-url`.
 
 **1. Install the CLI.** It goes in its own isolated environment, so its
-dependencies never mix with a project's:
+dependencies never mix with a project's. Install the released package from
+PyPI, or the latest `main` straight from this repository:
 
 ```bash
+# released package, from PyPI
+uv tool install scriptit-cli
+
+# latest main, from GitHub
 uv tool install git+https://github.com/script-it/cli.git
 ```
-
-Installing from git while the package is pre-release; a `pip install
-scriptit-cli` will replace this once it is published.
 
 <details>
 <summary>Other installers</summary>
 
 ```bash
 # pipx — same isolation as uv tool
+pipx install scriptit-cli
 pipx install git+https://github.com/script-it/cli.git
 
 # plain pip, into whatever environment is active
+pip install scriptit-cli
 pip install git+https://github.com/script-it/cli.git
 ```
 
@@ -140,6 +140,10 @@ skill does and why it stays this small.
 uv tool upgrade scriptit-cli
 uv tool uninstall scriptit-cli
 ```
+
+`uv tool upgrade` follows the source you installed from: the latest release
+for the PyPI package, the latest `main` for a git install. Running
+`uv tool install` with the other source switches between them.
 
 Logging out forgets the stored credential without uninstalling anything:
 
