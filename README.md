@@ -70,20 +70,26 @@ No `uv`? `curl -LsSf https://astral.sh/uv/install.sh | sh`, or use `pipx`.
 scriptit version
 ```
 
-**3. Sign in.** This opens your browser. Your password never reaches the CLI —
-it stores a refresh token, plus the short-lived token it trades that for, at
-`~/.config/scriptit/credentials.json` (mode 0600):
+**3. Sign in.** This opens your browser on an approval page: check it shows the
+same short code the CLI printed, approve, and the CLI finishes on its own. Your
+password never reaches the CLI — it stores a refresh token, plus the
+short-lived token it trades that for, at `~/.config/scriptit/credentials.json`
+(mode 0600):
 
 ```bash
 scriptit auth login
 ```
 
-On a machine with no browser (SSH, a container), add `--manual` and paste the
-code it asks for. For an on-prem deployment, add
-`--api-url https://<your-deployment>` — the CLI reads the auth mode from it and
-switches to a device-code flow by itself. When a coding agent runs this, the
-CLI prints the URL instead of opening a window — the agent's browser is not the
-one that would have opened. `--no-browser` forces that anywhere.
+The browser never has to reach the machine the CLI runs on, so the same
+command works over SSH, in a container or in a hosted agent's terminal: where
+no window can open, open the printed link wherever you're signed in. The link
+carries nothing anyone else can sign in with, so it is safe to pass through a
+chat, and if the command is interrupted before you approve, running it again
+resumes the same link. When a coding agent runs this, the CLI prints the URL
+instead of opening a window — the agent's browser is not the one that would
+have opened. `--no-browser` forces that anywhere. For an on-prem deployment,
+add `--api-url https://<your-deployment>` — the CLI reads the auth mode from it
+and switches to a device-code flow by itself.
 
 **4. See what you have, then run one.** `skills list` is the index of your
 scripts (alongside the platform's own skills); `start` takes a bare name from
