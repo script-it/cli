@@ -21,7 +21,7 @@ session in the Script.it app.
 You need a Script.it account and the CLI:
 
 ```bash
-uv tool install git+https://github.com/script-it/cli.git
+uv tool install scriptit-cli
 scriptit auth login
 ```
 

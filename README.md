@@ -1,12 +1,8 @@
 # <img src="assets/logo.png" alt="" height="30" align="top"> Script.it
 
-<!-- PyPI badges are held back until the package is published; shields.io
-     renders "package or version not found" for an unpublished name.
 [![PyPI](https://img.shields.io/pypi/v/scriptit-cli.svg)](https://pypi.org/project/scriptit-cli/)
 [![Python](https://img.shields.io/pypi/pyversions/scriptit-cli.svg)](https://pypi.org/project/scriptit-cli/)
--->
 [![CI](https://github.com/script-it/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/script-it/cli/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 <img src="assets/squiggle.png" alt="" width="100%">
@@ -41,21 +37,18 @@ with `--api-url`.
 dependencies never mix with a project's:
 
 ```bash
-uv tool install git+https://github.com/script-it/cli.git
+uv tool install scriptit-cli
 ```
-
-Installing from git while the package is pre-release; a `pip install
-scriptit-cli` will replace this once it is published.
 
 <details>
 <summary>Other installers</summary>
 
 ```bash
 # pipx — same isolation as uv tool
-pipx install git+https://github.com/script-it/cli.git
+pipx install scriptit-cli
 
 # plain pip, into whatever environment is active
-pip install git+https://github.com/script-it/cli.git
+pip install scriptit-cli
 ```
 
 Prefer `uv tool` or `pipx`: they keep the CLI and its dependencies out of
@@ -140,6 +133,9 @@ skill does and why it stays this small.
 uv tool upgrade scriptit-cli
 uv tool uninstall scriptit-cli
 ```
+
+A copy installed from the git repository keeps upgrading from git; running
+`uv tool install scriptit-cli` once moves it to the published package.
 
 Logging out forgets the stored credential without uninstalling anything:
 
