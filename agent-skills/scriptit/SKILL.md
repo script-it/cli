@@ -29,9 +29,10 @@ against the user's actual account.
    or token into the conversation.
 
    If the command is not found, the CLI is not installed. With the user's
-   go-ahead, install it with
-   `uv tool install scriptit-cli` (or `pipx install scriptit-cli` when `uv`
-   is missing), then continue.
+   go-ahead, install it with `uv tool install scriptit-cli` (the released
+   package) or `uv tool install git+https://github.com/script-it/cli.git`
+   (the latest `main`); use `pipx install` with the same argument when `uv`
+   is missing. Then continue.
 
 2. `scriptit session new` — create the session this task runs in.
 

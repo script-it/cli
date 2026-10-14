@@ -34,10 +34,15 @@ at [script.it](https://script.it), or point the CLI at a self-hosted deployment
 with `--api-url`.
 
 **1. Install the CLI.** It goes in its own isolated environment, so its
-dependencies never mix with a project's:
+dependencies never mix with a project's. Install the released package from
+PyPI, or the latest `main` straight from this repository:
 
 ```bash
+# released package, from PyPI
 uv tool install scriptit-cli
+
+# latest main, from GitHub
+uv tool install git+https://github.com/script-it/cli.git
 ```
 
 <details>
@@ -46,9 +51,11 @@ uv tool install scriptit-cli
 ```bash
 # pipx — same isolation as uv tool
 pipx install scriptit-cli
+pipx install git+https://github.com/script-it/cli.git
 
 # plain pip, into whatever environment is active
 pip install scriptit-cli
+pip install git+https://github.com/script-it/cli.git
 ```
 
 Prefer `uv tool` or `pipx`: they keep the CLI and its dependencies out of
@@ -134,8 +141,9 @@ uv tool upgrade scriptit-cli
 uv tool uninstall scriptit-cli
 ```
 
-A copy installed from the git repository keeps upgrading from git; running
-`uv tool install scriptit-cli` once moves it to the published package.
+`uv tool upgrade` follows the source you installed from: the latest release
+for the PyPI package, the latest `main` for a git install. Running
+`uv tool install` with the other source switches between them.
 
 Logging out forgets the stored credential without uninstalling anything:
 
