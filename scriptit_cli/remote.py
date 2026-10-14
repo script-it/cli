@@ -33,7 +33,7 @@ from scriptit_cli.analytics import analytics
 from scriptit_cli.client import detect_client
 from scriptit_cli.config import _config_dir
 from scriptit_cli.errors import RemoteAuthError, RemoteError, ScriptItError
-from scriptit_cli.remote_auth import get_fresh_id_token, load_credentials
+from scriptit_cli.remote_auth import ended_session_message, get_fresh_id_token, load_credentials
 from scriptit_cli.util import update_json_file
 
 STATE_FILE = "remote_state.json"
@@ -373,6 +373,10 @@ class _SessionEvents:
                     self.url, headers=headers, stream=True, timeout=(15, 60)
                 ) as resp:
                     self.response = resp
+                    ended = ended_session_message(resp)
+                    if ended is not None:
+                        self._fail(ended)
+                        return
                     if resp.status_code != 200:
                         message = f"events stream failed ({resp.status_code})"
                         if resp.status_code < 500:
@@ -474,7 +478,11 @@ class RemoteClient:
         timeout: float = 60.0,
         **kwargs: Any,
     ) -> requests.Response:
-        """One API call; only reads automatically retry sandbox resume 503s."""
+        """One API call; only reads automatically retry sandbox resume 503s.
+
+        A sign-in the backend no longer serves raises ``RemoteAuthError``
+        saying why, rather than reaching each caller as a bare 401.
+        """
         url = f"{self.api_url}{path}"
         retry = wake_on_503 and method.upper() in ("GET", "HEAD")
         deadline = time.time() + 180 if retry else time.time()
@@ -488,6 +496,10 @@ class RemoteClient:
                 # the CLI's own error type so every caller prints it cleanly.
                 raise RemoteError(f"API request failed: {exc}") from exc
             if resp.status_code != 503 or time.time() >= deadline:
+                ended = ended_session_message(resp)
+                if ended is not None:
+                    resp.close()
+                    raise RemoteAuthError(ended)
                 return resp
             # Unread retry responses would sit on pool connections until GC.
             resp.close()

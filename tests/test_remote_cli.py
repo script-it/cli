@@ -1000,6 +1000,11 @@ def _client_for_stream_test(monkeypatch, get_response):
             "stream is version 2 and scriptit-cli .* reads version 1: upgrade scriptit-cli",
             id="another-wire-version",
         ),
+        pytest.param(
+            lambda: _json_response({"detail": "session_expired"}, 401),
+            r"sign-in has ended .* Run `scriptit auth login` to sign in again\.",
+            id="sign-in-ended",
+        ),
     ],
 )
 def test_stream_failure_before_bootstrap_blocks_the_dispatch(
@@ -1758,6 +1763,53 @@ def test_identity_provider_failures_are_reported_not_raised(monkeypatch, failure
 
 def _not_json(self):
     raise ValueError("not json")
+
+
+@pytest.mark.parametrize(
+    ("detail", "says"),
+    [
+        ("session_expired", "lasts 24 hours"),
+        ("session_revoked", "app that connected it was disconnected"),
+    ],
+)
+def test_a_sign_in_the_backend_ended_is_explained(detail: str, says: str) -> None:
+    message = remote_auth.ended_session_message(_json_response({"detail": detail}, 401))
+
+    assert message is not None
+    assert says in message
+    assert message.endswith("Run `scriptit auth login` to sign in again.")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        lambda: _json_response({"detail": "Not authenticated"}, 401),
+        lambda: _json_response({"detail": "session_expired"}, 403),
+        lambda: _json_response(["session_expired"], 401),
+        lambda: type("R", (), {"status_code": 401, "json": _not_json})(),
+    ],
+    ids=["other-401", "other-status", "not-an-object", "not-json"],
+)
+def test_other_refusals_are_left_to_the_caller(response) -> None:
+    assert remote_auth.ended_session_message(response()) is None
+
+
+def test_an_api_call_on_an_ended_sign_in_raises_the_reason(monkeypatch) -> None:
+    client = remote.RemoteClient.__new__(remote.RemoteClient)
+    client.api_url = "http://x"
+    client._http = type(
+        "S",
+        (),
+        {
+            "request": staticmethod(
+                lambda *a, **k: _json_response({"detail": "session_revoked"}, 401)
+            )
+        },
+    )()
+    monkeypatch.setattr(remote.RemoteClient, "_headers", lambda self: {})
+
+    with pytest.raises(errors.RemoteAuthError, match="was disconnected"):
+        client.request("GET", "/api/v1/auth/me")
 
 
 def test_a_provider_omitting_a_promised_field_is_reported(monkeypatch) -> None:

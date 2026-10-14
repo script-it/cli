@@ -222,6 +222,38 @@ def _expires_in(value: Any, default: int) -> int:
     return seconds if seconds > 0 else default
 
 
+# What the backend says, as a 401 ``detail``, when it stops serving a sign-in
+# that is otherwise valid; the identity provider goes on refreshing its token,
+# so signing in again is the only way forward.
+_ENDED_SESSIONS = {
+    "session_expired": (
+        "this terminal's sign-in has ended — a sign-in approved through an app "
+        "such as ChatGPT lasts 24 hours"
+    ),
+    "session_revoked": (
+        "this terminal was signed out because the app that connected it was "
+        "disconnected from your Script.it account"
+    ),
+}
+
+
+def ended_session_message(resp: Any) -> Optional[str]:
+    """Why the backend stopped serving this sign-in, if that is what ``resp`` says.
+
+    ``None`` for any other response, so callers go on to their own handling.
+    """
+    if getattr(resp, "status_code", None) != 401:
+        return None
+    try:
+        detail = resp.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    reason = _ENDED_SESSIONS.get(detail) if isinstance(detail, str) else None
+    if reason is None:
+        return None
+    return f"{reason}. Run `scriptit auth login` to sign in again."
+
+
 def _auth_post(url: str, *, what: str, timeout: float = 30, **kwargs: Any) -> Dict[str, Any]:
     """POST to an identity provider and return its JSON body.
 
