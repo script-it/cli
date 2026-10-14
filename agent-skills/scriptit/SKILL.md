@@ -77,6 +77,9 @@ machine. Every other Script.it verb is forwarded to the CLI in the sandbox.
   sandbox.
 - `scriptit fs pull <remote-path> <local-path>` — download one remote file;
   parent directories are created automatically.
+- A relative `<remote-path>` starts where `exec` runs, in the session's
+  directory, so `workspaces/<workspace-id>/...` and a run's `data_files/...`
+  name the same files in `fs` as in `exec`.
 
 ### Sessions and sandbox
 
