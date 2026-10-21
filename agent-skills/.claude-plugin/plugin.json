@@ -1,7 +1,7 @@
 {
   "name": "scriptit",
   "displayName": "Script.it",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Automations your teammates and your AI agents can both run, built from readable steps a human can verify.",
   "author": {
     "name": "Script.it"
