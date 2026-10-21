@@ -26,6 +26,11 @@ classifiers = [
 ]
 dependencies = [
   "requests>=2.28",
+  # requests verifies TLS against certifi's bundle, and every API call carries
+  # the user's bearer token. This floor keeps the trust store free of the
+  # emSign roots whose eMudhra intermediate keys are compromised
+  # (GHSA-6q48-6c7w-9gw2).
+  "certifi>=2026.10.19",
   "fire>=0.5",
   # Cross-platform advisory locking for the credential/state stores. Hand-rolled
   # `fcntl.flock` held only on POSIX, so Windows silently lost concurrent writes.

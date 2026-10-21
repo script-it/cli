@@ -25,9 +25,10 @@ overwrite the real `~/.config/scriptit/credentials.json` on your machine.
 
 The client forwards commands and formats what comes back; it does not execute
 automation, parse scripts, or know what a block is. Its dependencies are
-`requests`, `fire`, `filelock` and `packaging` — all small, and each earning
-its place: the last two replace hand-rolled code that was wrong on Windows and
-wrong about PEP 440.
+`requests`, `certifi`, `fire`, `filelock` and `packaging` — all small, and each
+earning its place: `certifi` is the trust store `requests` already uses, held
+at a floor that excludes a compromised CA chain, and the last two replace
+hand-rolled code that was wrong on Windows and wrong about PEP 440.
 
 That boundary is what lets the platform ship features without a client release,
 and it is easy to erode by accident. If a change needs the runtime, it belongs
