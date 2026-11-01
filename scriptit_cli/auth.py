@@ -183,7 +183,8 @@ def _receive_via_approval(
     else:
         note("Open this URL in a browser where you're signed in to Script.it:")
         note(f"  {url}")
-    note(f"Approve it if the page shows the code {challenge[:4].upper()}-{challenge[4:8].upper()}.")
+    code = f"{challenge[:4].upper()}-{challenge[4:8].upper()}"
+    note(f"Enter the code {code} on that page to approve it.")
     note("If this command is interrupted, run it again: it resumes this same login.")
 
     deadline = time.monotonic() + timeout

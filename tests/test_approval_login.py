@@ -104,8 +104,8 @@ def test_the_url_carries_the_digest_and_never_the_verifier(monkeypatch, capsys) 
     challenge = _printed_challenge(shown)
     assert challenge == hashlib.sha256(verifier.encode("utf-8")).hexdigest()
     assert verifier not in shown
-    # The code the page shows beside the approve button.
-    assert f"{challenge[:4].upper()}-{challenge[4:8].upper()}" in shown
+    # The code the user enters on the page to approve.
+    assert f"Enter the code {challenge[:4].upper()}-{challenge[4:8].upper()} on that page" in shown
     assert payload["custom_token"] == "CT"
     assert payload["user_email"] == "a@example.com"
 
