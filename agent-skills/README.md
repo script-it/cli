@@ -5,10 +5,10 @@ steps a human can verify.
 
 The Script.it plugin connects your coding agent — Claude Code, Codex, or any
 host that reads Agent Skills — to your [Script.it](https://script.it) workspace
-through the open-source `scriptit` CLI. The agent can find, write, run and
-schedule your scripts in your Script.it cloud environment, with your
-integrations already connected, and every command it runs shows up as a
-session in the Script.it app.
+through Script.it's MCP server and the open-source `scriptit` CLI. The agent
+can find, write, run and schedule your scripts in your Script.it cloud
+environment, with your integrations already connected, and every command it
+runs shows up as a session in the Script.it app.
 
 ## The skill
 
@@ -16,9 +16,20 @@ session in the Script.it app.
   the CLI is signed in, creates a session, and fetches that session's live
   instructions with `scriptit context`; the platform supplies the rest.
 
+## The MCP server
+
+- **scriptit** (`https://api.script.it/mcp`) — Script.it's remote MCP server.
+  You sign in to it once with your Script.it account (in Claude Code, from
+  `/mcp`). Its tools open a session in your Script.it environment and run
+  commands there (`start_session`, `run_command`, `read_output`), show which
+  account is connected (`whoami`), and sign the CLI in without another browser
+  approval (`connect_terminal`). With the tools connected, the agent can work
+  in Script.it without the CLI installed.
+
 ## Install
 
-You need a Script.it account and the CLI:
+You need a Script.it account. The CLI lets the agent move files between your
+machine and Script.it:
 
 ```bash
 uv tool install scriptit-cli   # released package, from PyPI
@@ -37,13 +48,17 @@ Then add the plugin to your agent:
 
 ## What it sends, and where
 
-The skill has the agent run the `scriptit` CLI on your machine. The plugin
-itself has no MCP servers, hooks or scripts.
+The plugin has one remote MCP server and no hooks or scripts. The skill has the
+agent run the `scriptit` CLI on your machine.
 
 - **Your Script.it deployment** (`api.script.it`, or the one you signed in to
   with `--api-url`) receives every command the agent runs and the files it
   moves with `scriptit fs`. Commands run in your Script.it environment, and
   each one is recorded in a session you can see in the app.
+- **Script.it's MCP server** (`api.script.it/mcp`) receives the tool calls
+  your agent makes: the commands it runs and the files it writes in your
+  Script.it environment, recorded in a session the same way. You sign in to it
+  in your browser with OAuth, and your agent's host keeps the resulting token.
 - **Signing in** to Script.it cloud goes through your browser and exchanges
   tokens with Google's Firebase Authentication
   (`identitytoolkit.googleapis.com`, `securetoken.googleapis.com`); a

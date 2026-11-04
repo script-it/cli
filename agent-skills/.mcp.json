@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "scriptit": {
+      "type": "http",
+      "url": "https://api.script.it/mcp"
+    }
+  }
+}

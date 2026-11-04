@@ -28,11 +28,20 @@ against the user's actual account.
    run it again: it resumes the same link. Never ask the user to paste a code
    or token into the conversation.
 
+   If Script.it's MCP tools are connected, sign in through them instead: run
+   `scriptit auth login --no-browser`, pass the link and code it prints to the
+   `connect_terminal` tool, and do what its answer says.
+
    If the command is not found, the CLI is not installed. With the user's
    go-ahead, install it with `uv tool install scriptit-cli` (the released
    package) or `uv tool install git+https://github.com/script-it/cli.git`
    (the latest `main`); use `pipx install` with the same argument when `uv`
    is missing. Then continue.
+
+   If the user would rather not install it and Script.it's MCP tools are
+   connected, work through them instead: `start_session` opens the session
+   and returns its context in place of steps 2 and 3, and `run_command` runs
+   commands in it.
 
 2. `scriptit session new` — create the session this task runs in.
 

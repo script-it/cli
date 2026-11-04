@@ -113,7 +113,9 @@ In Claude Code, install it as a plugin — this repository is its marketplace:
 ```
 
 `claude plugin update scriptit@script-it` brings it up to date, or turn on
-auto-update for the `script-it` marketplace under `/plugin`.
+auto-update for the `script-it` marketplace under `/plugin`. The plugin also
+connects Script.it's MCP server (`https://api.script.it/mcp`); sign in to it
+from `/mcp`.
 
 Codex installs the same plugin from the same marketplace:
 

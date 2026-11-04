@@ -16,6 +16,7 @@ from scriptit_cli import __version__
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_MANIFEST = ROOT / "agent-skills" / ".claude-plugin" / "plugin.json"
 MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
+PLUGIN_MCP_SERVERS = ROOT / "agent-skills" / ".mcp.json"
 
 
 def test_plugin_version_matches_package_version():
@@ -39,3 +40,13 @@ def test_marketplace_entry_leaves_version_to_the_manifest():
     # second copy here could only drift.
     marketplace = json.loads(MARKETPLACE.read_text())
     assert all("version" not in entry for entry in marketplace["plugins"])
+
+
+def test_plugin_mcp_servers_are_remote():
+    # The plugin ships nothing to run on the user's machine: each server is a
+    # hosted endpoint the agent's host reaches over HTTPS and signs in to.
+    servers = json.loads(PLUGIN_MCP_SERVERS.read_text())["mcpServers"]
+    assert servers
+    for server in servers.values():
+        assert server["type"] == "http"
+        assert server["url"].startswith("https://")
